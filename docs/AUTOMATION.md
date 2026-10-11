@@ -314,6 +314,7 @@ When the DVC channel closes or errors, the PS agent:
 | `automation/dvc_ipc.rs` | IPC client (request/response handling) |
 | `automation/scripts/agent.ps1` | Embedded PowerShell agent |
 | `automation/scripts/lib/dvc.ps1` | WTS API P/Invoke for DVC |
+| `automation/scripts/lib/uia_com.ps1` | UI Automation COM walker, model and pattern actions |
 | `handlers/automate.rs` | CLI command dispatch |
 | `rdp_session.rs` | DrdynvcClient setup and DVC command handling |
 
@@ -321,5 +322,5 @@ When the DVC channel closes or errors, the PS agent:
 
 1. **Single Session**: One automation agent per RDP connection
 2. **UAC**: Cannot automate elevated (admin) windows from non-elevated context
-3. **WebViews**: Cannot access content inside WebView controls (Edge, Electron apps)
-4. **Bootstrap via RDPDR**: Initial agent launch still uses drive mapping
+3. **Web content**: Chromium- and Electron-based windows do expose their content - the renderer enables accessibility when an automation client queries the window, and `--force-renderer-accessibility` forces it when detection fails - but their trees are large, so scope a snapshot (`-s`) or use targeted selectors instead of walking everything.
+4. **Bootstrap**: the helper is staged and launched from `--automation-agent-dir` when that is given; otherwise staging goes through the RDPDR-mapped `\\TSCLIENT` drive, which is unavailable when the server policy disables drive redirection.

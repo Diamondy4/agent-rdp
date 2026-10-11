@@ -21,6 +21,7 @@ const LIB_SNAPSHOT: &str = include_str!("scripts/lib/snapshot.ps1");
 const LIB_SELECTORS: &str = include_str!("scripts/lib/selectors.ps1");
 const LIB_ACTIONS: &str = include_str!("scripts/lib/actions.ps1");
 const LIB_DVC: &str = include_str!("scripts/lib/dvc.ps1");
+const LIB_UIA_COM: &str = include_str!("scripts/lib/uia_com.ps1");
 
 /// Automation bootstrap handler.
 pub struct AutomationBootstrap {
@@ -76,6 +77,7 @@ impl AutomationBootstrap {
         tokio::fs::write(lib_dir.join("selectors.ps1"), LIB_SELECTORS).await?;
         tokio::fs::write(lib_dir.join("actions.ps1"), LIB_ACTIONS).await?;
         tokio::fs::write(lib_dir.join("dvc.ps1"), LIB_DVC).await?;
+        tokio::fs::write(lib_dir.join("uia_com.ps1"), LIB_UIA_COM).await?;
         debug!("Wrote automation library files to {:?}", lib_dir);
 
         Ok(())
@@ -290,10 +292,41 @@ mod tests {
         assert!(lib_dir.join("selectors.ps1").exists());
         assert!(lib_dir.join("actions.ps1").exists());
         assert!(lib_dir.join("dvc.ps1").exists());
+        assert!(lib_dir.join("uia_com.ps1").exists());
 
         // Verify DVC IPC is initialized
         assert!(state.dvc_ipc.is_some());
         assert!(state.dvc_state.is_some());
+    }
+
+    /// Every library agent.ps1 dot-sources has to be part of the embedded set:
+    /// a missing file makes the helper die on startup in a provisioned session.
+    #[tokio::test]
+    async fn test_provisioning_writes_every_library_the_agent_loads() {
+        let temp_dir = TempDir::new().unwrap();
+        let bootstrap = AutomationBootstrap::new(temp_dir.path().to_path_buf());
+        let mut state = AutomationState::new(temp_dir.path().to_path_buf());
+
+        bootstrap.initialize(&mut state).await.unwrap();
+
+        let lib_dir = state.automation_dir.join("scripts/lib");
+        let mut loads = 0;
+
+        for line in AGENT_SCRIPT.lines() {
+            let line = line.trim();
+            if !line.starts_with('.') || !line.ends_with(".ps1\"") {
+                continue;
+            }
+
+            let name = line.rsplit('\\').next().unwrap().trim_end_matches('"');
+            loads += 1;
+            assert!(
+                lib_dir.join(name).exists(),
+                "agent.ps1 loads lib/{name}, but provisioning does not write it"
+            );
+        }
+
+        assert!(loads >= 6, "expected agent.ps1 to load every library, saw {loads}");
     }
 
     #[test]
