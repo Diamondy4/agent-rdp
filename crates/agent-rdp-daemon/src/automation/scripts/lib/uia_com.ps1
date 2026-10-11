@@ -61,6 +61,8 @@ public class UiaSnapshot {
     public UiaNode Root;
     public bool Truncated;
     public int NodeCount;
+    public bool ProviderFailure;
+    public int SkippedWindows;
 }
 
 public enum UiaTreeScope { None = 0, Element = 1, Children = 2, Descendants = 4, Parent = 8, Ancestors = 16, Subtree = 7 }
@@ -90,11 +92,11 @@ public interface IUIAutomationElement {
     void SetFocus();
     void GetRuntimeId();
     void FindFirst();
-    void FindAll();
+    IUIAutomationElementArray FindAll(UiaTreeScope scope, IUIAutomationCondition condition);
     void FindFirstBuildCache();
     IUIAutomationElementArray FindAllBuildCache(UiaTreeScope scope, IUIAutomationCondition condition, IUIAutomationCacheRequest cacheRequest);
-    void BuildUpdatedCache();
-    void GetCurrentPropertyValue();
+    IUIAutomationElement BuildUpdatedCache(IUIAutomationCacheRequest cacheRequest);
+    object GetCurrentPropertyValue(int propertyId);
     void GetCurrentPropertyValueEx();
     object GetCachedPropertyValue(int propertyId);
     void GetCachedPropertyValueEx();
@@ -245,10 +247,6 @@ public static class UiaComWalker {
         , PidProcessId, PidWindowVisualState, PidToggleToggleState
     };
 
-    private static readonly int[] CachedPatterns = new int[] {
-        10000, 10001, 10002, 10003, 10004, 10005, 10009, 10010, 10014, 10015, 10016, 10017
-    };
-
     private static readonly Dictionary<int, string> ControlTypes = new Dictionary<int, string> {
         { 50000, "Button" }, { 50001, "Calendar" }, { 50002, "CheckBox" }, { 50003, "ComboBox" },
         { 50004, "Edit" }, { 50005, "Hyperlink" }, { 50006, "Image" }, { 50007, "ListItem" },
@@ -267,6 +265,7 @@ public static class UiaComWalker {
     // node directly instead of re-finding it (no hit tests, no coordinate math).
     private static readonly List<IUIAutomationElement> Elements = new List<IUIAutomationElement>();
     private static readonly object ElementsLock = new object();
+    private static int WalkEpoch = 0;
 
     private sealed class WalkState {
         public int MaxNodes;
@@ -275,20 +274,39 @@ public static class UiaComWalker {
         public System.Diagnostics.Stopwatch Clock;
         public int NodeCount;
         public bool Truncated;
+        public bool ProviderFailure;
+        public int SkippedWindows;
+        public bool PerWindow;
+        public IUIAutomationCondition TrueCondition;
+        public IUIAutomationCacheRequest SubtreeCache;
+        public List<IUIAutomationElement> Elements;
     }
 
     public static UiaSnapshot Snapshot(int maxDepth, int maxNodes, int maxSeconds) {
         UiaSnapshot result = null;
         Exception failure = null;
+        int epoch;
+
+        lock (ElementsLock) { epoch = ++WalkEpoch; }
+
+        // The cache builds inside the walk talk to every provider and none of it is
+        // interruptible, so the walk gets a wall-clock bound of its own: past it the
+        // agent answers with an error instead of holding every later request behind
+        // a provider that will not answer.
+        long budgetMs = (long)maxSeconds * 1000L + 3000L;
 
         Thread worker = new Thread(delegate() {
-            try { result = SnapshotCore(maxDepth, maxNodes, maxSeconds); }
+            try { result = SnapshotCore(maxDepth, maxNodes, maxSeconds, epoch); }
             catch (Exception ex) { failure = ex; }
         });
         worker.SetApartmentState(ApartmentState.MTA);
         worker.IsBackground = true;
         worker.Start();
-        worker.Join();
+
+        if (!worker.Join((int)budgetMs)) {
+            throw new InvalidOperationException(
+                "UI Automation COM walk did not finish within " + budgetMs + " ms; a provider is probably blocking the desktop (the partial walk was discarded)");
+        }
 
         if (failure != null) {
             throw new InvalidOperationException("UI Automation COM walk failed: " + failure.Message, failure);
@@ -297,36 +315,70 @@ public static class UiaComWalker {
         return result;
     }
 
-    private static UiaSnapshot SnapshotCore(int maxDepth, int maxNodes, int maxSeconds) {
+    // Cached properties only. The cached pattern objects were never used - pattern
+    // availability comes from the Is*PatternAvailable properties and actions call
+    // GetCurrentPattern on the live element - while asking every provider for a
+    // dozen pattern objects per node is the largest part of a cache build and
+    // another way for the whole batch to fail.
+    private static IUIAutomationCacheRequest CreateCacheRequest(IUIAutomation uia, UiaTreeScope scope) {
+        IUIAutomationCacheRequest cache = uia.CreateCacheRequest();
+        cache.TreeScope = scope;
+        cache.AutomationElementMode = UiaElementMode.Full;
+        foreach (int propertyId in CachedProperties) { cache.AddProperty(propertyId); }
+        return cache;
+    }
+
+    private static UiaSnapshot SnapshotCore(int maxDepth, int maxNodes, int maxSeconds, int epoch) {
         Guid coclassId = new Guid("ff48dba4-60ef-4201-aa87-54103eef594e");
         IUIAutomation uia = (IUIAutomation)Activator.CreateInstance(Type.GetTypeFromCLSID(coclassId));
 
-        IUIAutomationCacheRequest cache = uia.CreateCacheRequest();
-        cache.TreeScope = UiaTreeScope.Subtree;
-        cache.AutomationElementMode = UiaElementMode.Full;
-        foreach (int propertyId in CachedProperties) { cache.AddProperty(propertyId); }
-        foreach (int patternId in CachedPatterns) { cache.AddPattern(patternId); }
+        IUIAutomationCacheRequest subtreeCache = CreateCacheRequest(uia, UiaTreeScope.Subtree);
+        IUIAutomationElement desktop;
+        bool perWindow = false;
 
-        IUIAutomationCondition trueCondition = uia.CreateTrueCondition();
-        // The desktop must come from the cache-aware entry point, otherwise it
-        // has no cache and GetCachedChildren returns nothing.
-        IUIAutomationElement desktop = uia.GetRootElementBuildCache(cache);
+        try {
+            // Fast path: one Subtree-scoped cache for the whole desktop.
+            desktop = uia.GetRootElementBuildCache(subtreeCache);
+        } catch (Exception) {
+            // A provider can fail the desktop-wide batch (observed on a live host:
+            // the desktop root itself answered E_FAIL, so any build that includes
+            // the element failed while a Children-scoped one worked). Cache each
+            // top-level window on its own instead, so one broken provider costs
+            // that window rather than every snapshot.
+            perWindow = true;
+            try {
+                desktop = uia.GetRootElementBuildCache(CreateCacheRequest(uia, UiaTreeScope.Element | UiaTreeScope.Children));
+            } catch (Exception) {
+                desktop = uia.GetRootElement();
+            }
+        }
 
         WalkState state = new WalkState();
         state.MaxNodes = maxNodes;
-
-        lock (ElementsLock) {
-            Elements.Clear();
-            Elements.Add(null);   // ids are 1-based (UiaNode.Id == NodeCount)
-        }
         state.MaxDepth = maxDepth;
         state.MaxMilliseconds = (long)maxSeconds * 1000;
         state.Clock = System.Diagnostics.Stopwatch.StartNew();
+        state.PerWindow = perWindow;
+        state.TrueCondition = uia.CreateTrueCondition();
+        state.SubtreeCache = subtreeCache;
+        state.Elements = new List<IUIAutomationElement>();
+        state.Elements.Add(null);   // ids are 1-based (UiaNode.Id == NodeCount)
 
         UiaSnapshot snapshot = new UiaSnapshot();
         snapshot.Root = BuildNode(desktop, 0, 0, state);
         snapshot.NodeCount = state.NodeCount;
         snapshot.Truncated = state.Truncated;
+        snapshot.ProviderFailure = state.ProviderFailure;
+        snapshot.SkippedWindows = state.SkippedWindows;
+
+        // Publish only on completion: an abandoned (timed-out) walk must not
+        // overwrite the element list of a newer one.
+        lock (ElementsLock) {
+            if (epoch == WalkEpoch) {
+                Elements.Clear();
+                Elements.AddRange(state.Elements);
+            }
+        }
 
         return snapshot;
     }
@@ -364,7 +416,7 @@ public static class UiaComWalker {
        node.WindowVisualState = IntValue(element, PidWindowVisualState);
         node.Id = state.NodeCount;
         node.NativeWindowHandle = IntValue(element, PidNativeWindowHandle);
-        Elements.Add(element);
+        state.Elements.Add(element);
         node.Patterns = PatternsOf(element);
 
         node.HasValue = Flag(element, PidIsValueAvailable);
@@ -379,12 +431,45 @@ public static class UiaComWalker {
         }
 
         if (depth < state.MaxDepth) {
-            IUIAutomationElementArray children = element.GetCachedChildren();
+            IUIAutomationElementArray children = null;
+            try {
+                // In the per-window fallback the desktop has no cache of its own,
+                // so its children come from a live search.
+                children = (state.PerWindow && depth == 0)
+                    ? element.FindAll(UiaTreeScope.Children, state.TrueCondition)
+                    : element.GetCachedChildren();
+            } catch (Exception) {
+                // A provider that throws for this element costs its own subtree,
+                // not the whole walk; the snapshot reports what is missing.
+                state.ProviderFailure = true;
+                state.SkippedWindows++;
+                children = null;
+            }
             if (children != null) {
                 int count = children.Length;
                 for (int i = 0; i < count; i++) {
-                    IUIAutomationElement child = children.GetElement(i);
+                    IUIAutomationElement child = null;
+                    try { child = children.GetElement(i); } catch (Exception) { continue; }
                     if (child == null) { continue; }
+
+                    if (state.PerWindow && depth == 0) {
+                        // Cache this window on its own; a provider that fails here
+                        // costs the window, not the desktop. One retry covers a
+                        // provider that is rebuilding its tree while we ask.
+                        IUIAutomationElement refreshed = null;
+                        for (int attempt = 0; attempt < 2 && refreshed == null; attempt++) {
+                            if (attempt > 0) { Thread.Sleep(250); }
+                            try { refreshed = child.BuildUpdatedCache(state.SubtreeCache); } catch (Exception) { }
+                        }
+
+                        if (refreshed == null) {
+                            state.ProviderFailure = true;
+                            state.SkippedWindows++;
+                            continue;
+                        }
+
+                        child = refreshed;
+                    }
 
                     UiaNode childNode = BuildNode(child, depth + 1, i, state);
                     if (childNode == null) { break; }
@@ -520,7 +605,11 @@ public static class UiaComWalker {
 
     private static object Prop(IUIAutomationElement element, int propertyId) {
         try { return element.GetCachedPropertyValue(propertyId); }
-        catch { return null; }
+        catch (Exception) { }
+
+        // An element without a cache (the plain-root fallback) answers live.
+        try { return element.GetCurrentPropertyValue(propertyId); }
+        catch (Exception) { return null; }
     }
 
     private static bool Flag(IUIAutomationElement element, int propertyId) {

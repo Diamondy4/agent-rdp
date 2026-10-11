@@ -151,14 +151,21 @@ function Invoke-Snapshot {
 
     $truncatedReason = $null
 
+    if ($comSnapshot.ProviderFailure) {
+        $script:WasTruncated = $true
+        $truncatedReason = "a UI Automation provider failed (" + $comSnapshot.SkippedWindows + " subtree(s) missing)"
+    }
+
     if ($comSnapshot.Truncated) {
         $script:WasTruncated = $true
-        if ($comSnapshot.NodeCount -ge $script:MaxSnapshotNodes) {
-            $truncatedReason = "node budget (" + $script:MaxSnapshotNodes + " nodes) reached"
-        } else {
-            $truncatedReason = "time budget (" + $script:MaxSnapshotSeconds + " s) reached"
+        if ($null -eq $truncatedReason) {
+            if ($comSnapshot.NodeCount -ge $script:MaxSnapshotNodes) {
+                $truncatedReason = "node budget (" + $script:MaxSnapshotNodes + " nodes) reached"
+            } else {
+                $truncatedReason = "time budget (" + $script:MaxSnapshotSeconds + " s) reached"
+            }
         }
-    } elseif ($script:WasTruncated) {
+    } elseif ($script:WasTruncated -and $null -eq $truncatedReason) {
         $truncatedReason = "depth limit (" + $maxDepth + ") reached"
     }
 
