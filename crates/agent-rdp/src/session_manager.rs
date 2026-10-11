@@ -34,12 +34,30 @@ impl SessionManager {
     }
 
     /// Get the PID file path for this session.
+    #[allow(dead_code)]
     pub fn pid_path(&self) -> PathBuf {
         get_pid_path(&self.session)
     }
 
     /// Check if the daemon is running.
-    pub fn is_daemon_alive(&self) -> bool {
+    #[cfg(unix)]
+    pub async fn is_daemon_alive(&self) -> bool {
+        // The daemon may run in a different PID namespace (for example when it
+        // was started from a container), where kill(pid, 0) reports it as gone.
+        // Ask the daemon itself over the session socket instead: only a
+        // responsive Ping proves it is actually serving requests.
+        let alive = self.verify_daemon_health().await;
+
+        if !alive {
+            self.cleanup_stale_session();
+        }
+
+        alive
+    }
+
+    /// Check if the daemon is running.
+    #[cfg(windows)]
+    pub async fn is_daemon_alive(&self) -> bool {
         let pid_path = self.pid_path();
 
         if !pid_path.exists() {
@@ -72,12 +90,6 @@ impl SessionManager {
     }
 
     /// Check if a process exists.
-    #[cfg(unix)]
-    fn process_exists(pid: u32) -> bool {
-        // kill(pid, 0) checks if process exists without sending a signal
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-
     #[cfg(windows)]
     fn process_exists(pid: u32) -> bool {
         use std::ptr;
@@ -103,12 +115,12 @@ impl SessionManager {
     /// Ensure the daemon is running, starting it if necessary.
     pub async fn ensure_daemon(&self) -> anyhow::Result<IpcClient> {
         // Check if already running
-        if self.is_daemon_alive() {
+        if self.is_daemon_alive().await {
             debug!("Daemon already running, connecting...");
             match self.connect_to_daemon().await {
                 Ok(client) => {
                     // Verify daemon is responsive with a ping
-                    if self.verify_daemon_health(&client).await {
+                    if self.verify_daemon_health().await {
                         return Ok(client);
                     }
                     warn!("Daemon not responsive, cleaning up and restarting...");
@@ -130,8 +142,8 @@ impl SessionManager {
         self.wait_for_daemon().await
     }
 
-    /// Verify daemon is responsive by sending a ping.
-    async fn verify_daemon_health(&self, _client: &IpcClient) -> bool {
+    /// Verify daemon is responsive by sending a ping over the session socket.
+    async fn verify_daemon_health(&self) -> bool {
         // Create a temporary mutable client for the ping
         let socket_path = self.socket_path();
         match IpcClient::connect(&socket_path).await {

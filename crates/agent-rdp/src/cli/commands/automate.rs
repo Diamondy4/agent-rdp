@@ -16,7 +16,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let manager = SessionManager::new(session.to_string());
 
-    if !manager.is_daemon_alive() {
+    if !manager.is_daemon_alive().await {
         output.print_error("daemon_not_running", "No daemon running for this session");
         std::process::exit(1);
     }

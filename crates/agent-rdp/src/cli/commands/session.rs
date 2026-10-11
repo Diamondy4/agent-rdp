@@ -32,7 +32,7 @@ async fn list_sessions(output: &Output) -> anyhow::Result<()> {
     for session_name in sessions {
         let manager = SessionManager::new(session_name.clone());
 
-        let state = if manager.is_daemon_alive() {
+        let state = if manager.is_daemon_alive().await {
             // Try to get session info
             if let Ok(mut client) = crate::ipc_client::try_connect(
                 &manager.socket_path(),
@@ -73,7 +73,7 @@ async fn list_sessions(output: &Output) -> anyhow::Result<()> {
 async fn session_info(session: &str, output: &Output, timeout_ms: u64) -> anyhow::Result<()> {
     let manager = SessionManager::new(session.to_string());
 
-    if !manager.is_daemon_alive() {
+    if !manager.is_daemon_alive().await {
         output.print_error("daemon_not_running", "No daemon running for this session");
         std::process::exit(1);
     }
