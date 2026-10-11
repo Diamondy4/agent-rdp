@@ -74,7 +74,7 @@ agent-rdp keyboard type "Hello World"     # Type text (supports Unicode)
 agent-rdp keyboard press "ctrl+c"         # Key combination
 agent-rdp keyboard press "alt+tab"        # Switch windows
 agent-rdp keyboard press "ctrl+shift+esc" # Task manager
-agent-rdp keyboard press "win+r"          # Run dialog
+agent-rdp keyboard press "win+r"          # Run dialog (press ctrl+a before typing)
 agent-rdp keyboard press enter            # Single key (use press, not key)
 agent-rdp keyboard press escape
 agent-rdp keyboard press f5
@@ -220,6 +220,8 @@ agent-rdp connect --host 192.168.1.100 -u Admin -p secret
 agent-rdp wait 3000                       # Wait for desktop
 agent-rdp keyboard press "win+r"          # Open Run dialog
 agent-rdp wait 1000
+agent-rdp keyboard press "ctrl+a"         # Select the remembered command
+agent-rdp wait 100
 agent-rdp keyboard type "powershell"
 agent-rdp keyboard press enter
 agent-rdp wait 2000                       # Wait for PowerShell
@@ -238,6 +240,8 @@ agent-rdp connect --host 192.168.1.100 -u Admin -p secret --drive /tmp/transfer:
 # On Windows, access files at \\tsclient\Transfer
 agent-rdp keyboard press "win+r"
 agent-rdp wait 500
+agent-rdp keyboard press "ctrl+a"         # Select the remembered command
+agent-rdp wait 100
 agent-rdp keyboard type "\\\\tsclient\\Transfer"
 agent-rdp keyboard press enter
 ```
@@ -297,6 +301,20 @@ agent-rdp view --port 9224
 ## Tips
 
 **Prefer `automate fill` over `keyboard type`** when automation is enabled—it's lossless (no dropped characters) and faster.
+
+### The Run dialog remembers the last command
+
+Windows may pre-fill the Run dialog with the previously executed command. Select it with
+`ctrl+a` before typing, otherwise the text is inserted into the stale command:
+
+```bash
+agent-rdp keyboard press "win+r"
+agent-rdp wait 500
+agent-rdp keyboard press "ctrl+a"          # select the remembered command
+agent-rdp wait 100
+agent-rdp keyboard type "<command>"
+agent-rdp keyboard press enter
+```
 
 ### Opening applications
 
