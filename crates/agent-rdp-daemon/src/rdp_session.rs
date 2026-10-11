@@ -19,6 +19,7 @@ use ironrdp::pdu::rdp::client_info::PerformanceFlags;
 use ironrdp::session::image::DecodedImage;
 use ironrdp::session::{ActiveStage, ActiveStageOutput};
 use ironrdp_dvc::DrdynvcClient;
+use ironrdp_dvc::pdu::{DataFirstPdu, DataPdu, DrdynvcDataPdu};
 use ironrdp_rdpdr::Rdpdr;
 
 use crate::automation::{AutomationDvc, SharedDvcState};
@@ -767,15 +768,14 @@ async fn run_frame_processor(
             } => {
                 if let Some(cmd) = dvc_cmd {
                     debug!("Sending {} bytes on DVC channel {}", cmd.data.len(), cmd.channel_id);
-                    use ironrdp_dvc::pdu::DataPdu;
                     use ironrdp_svc::SvcMessage;
 
-                    let data_pdu = ironrdp_dvc::pdu::DrdynvcDataPdu::Data(
-                        DataPdu::new(cmd.channel_id, cmd.data)
-                    );
-                    let svc_msg = SvcMessage::from(data_pdu);
+                    let svc_messages: Vec<SvcMessage> = fragment_dvc_data(cmd.channel_id, cmd.data)
+                        .into_iter()
+                        .map(SvcMessage::from)
+                        .collect();
 
-                    match active_stage.encode_dvc_messages(vec![svc_msg]) {
+                    match active_stage.encode_dvc_messages(svc_messages) {
                         Ok(frame) => {
                             if let Err(e) = framed.write_all(&frame).await {
                                 error!("Failed to send DVC data: {}", e);
@@ -967,4 +967,104 @@ fn create_key_event(scancode: u8, extended: bool, release: bool) -> FastPathInpu
         flags |= KeyboardFlags::EXTENDED;
     }
     FastPathInputEvent::KeyboardEvent(flags, scancode)
+}
+
+/// Split a DVC payload into `DYNVC` data PDUs.
+///
+/// A single data PDU carries at most `DrdynvcDataPdu::MAX_DATA_SIZE` bytes of
+/// payload, so longer messages are sent as a `DATA_FIRST` fragment carrying the
+/// total length followed by `DATA` fragments (MS-RDPEDYC 2.2.3.2). A single
+/// oversized PDU silently loses everything past the first fragment, which used to
+/// truncate large automation requests and leave the agent waiting for the rest.
+fn fragment_dvc_data(channel_id: u32, data: Vec<u8>) -> Vec<DrdynvcDataPdu> {
+    const MAX_FRAGMENT: usize = DrdynvcDataPdu::MAX_DATA_SIZE;
+
+    let total = data.len();
+
+    if total < MAX_FRAGMENT {
+        return vec![DrdynvcDataPdu::Data(DataPdu::new(channel_id, data))];
+    }
+
+    let total_length = u32::try_from(total).unwrap_or(u32::MAX);
+    let mut fragments = Vec::new();
+    let mut offset = 0;
+
+    while offset < total {
+        let end = core::cmp::min(offset + MAX_FRAGMENT, total);
+        let chunk = data[offset..end].to_vec();
+
+        fragments.push(if offset == 0 {
+            DrdynvcDataPdu::DataFirst(DataFirstPdu::new(channel_id, total_length, chunk))
+        } else {
+            DrdynvcDataPdu::Data(DataPdu::new(channel_id, chunk))
+        });
+
+        offset = end;
+    }
+
+    fragments
+}
+
+#[cfg(test)]
+mod dvc_fragment_tests {
+    use super::*;
+
+    #[test]
+    fn small_payload_stays_in_one_data_pdu() {
+        let payload = vec![7u8; DrdynvcDataPdu::MAX_DATA_SIZE - 1];
+        let fragments = fragment_dvc_data(3, payload.clone());
+
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(fragments[0].channel_id(), 3);
+
+        match &fragments[0] {
+            DrdynvcDataPdu::Data(pdu) => assert_eq!(pdu.data(), payload.as_slice()),
+            other => panic!("expected a single Data PDU, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn exact_max_payload_becomes_a_single_data_first() {
+        let payload = vec![1u8; DrdynvcDataPdu::MAX_DATA_SIZE];
+        let fragments = fragment_dvc_data(5, payload.clone());
+
+        assert_eq!(fragments.len(), 1);
+
+        match &fragments[0] {
+            DrdynvcDataPdu::DataFirst(pdu) => {
+                assert_eq!(pdu.length() as usize, payload.len());
+                assert_eq!(pdu.data(), payload.as_slice());
+            }
+            other => panic!("expected a DataFirst PDU, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn large_payload_splits_and_reassembles() {
+        let max = DrdynvcDataPdu::MAX_DATA_SIZE;
+        let payload: Vec<u8> = (0..(max * 2 + 10)).map(|i| (i % 251) as u8).collect();
+        let fragments = fragment_dvc_data(9, payload.clone());
+
+        assert_eq!(fragments.len(), 3);
+
+        let mut reassembled = Vec::new();
+        for (index, fragment) in fragments.iter().enumerate() {
+            assert_eq!(fragment.channel_id(), 9);
+
+            match fragment {
+                DrdynvcDataPdu::DataFirst(pdu) => {
+                    assert_eq!(pdu.length() as usize, payload.len());
+                    assert_eq!(pdu.data().len(), max);
+                    reassembled.extend_from_slice(pdu.data());
+                }
+                DrdynvcDataPdu::Data(pdu) => {
+                    let expected = if index == 1 { max } else { 10 };
+                    assert_eq!(pdu.data().len(), expected);
+                    reassembled.extend_from_slice(pdu.data());
+                }
+            }
+        }
+
+        assert_eq!(reassembled, payload);
+    }
 }
