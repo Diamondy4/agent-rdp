@@ -251,10 +251,10 @@ function Invoke-Get {
     if ($property -eq "all" -or $property -eq "bounds") {
         $rect = $element.Current.BoundingRectangle
         $result["bounds"] = @{
-            x = [int]$rect.X
-            y = [int]$rect.Y
-            width = [int]$rect.Width
-            height = [int]$rect.Height
+            x = ConvertTo-SafeInt32 $rect.X
+            y = ConvertTo-SafeInt32 $rect.Y
+            width = ConvertTo-SafeInt32 $rect.Width
+            height = ConvertTo-SafeInt32 $rect.Height
         }
     }
 
@@ -454,10 +454,10 @@ function Invoke-Window {
                 title = $win.Current.Name
                 process_id = $win.Current.ProcessId
                 bounds = @{
-                    x = [int]$rect.X
-                    y = [int]$rect.Y
-                    width = [int]$rect.Width
-                    height = [int]$rect.Height
+                    x = ConvertTo-SafeInt32 $rect.X
+                    y = ConvertTo-SafeInt32 $rect.Y
+                    width = ConvertTo-SafeInt32 $rect.Width
+                    height = ConvertTo-SafeInt32 $rect.Height
                 }
             }
         }
@@ -541,7 +541,15 @@ function Invoke-Run {
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = "powershell.exe"
-    $startInfo.Arguments = "-NoProfile -Command `"$command $commandArgs`""
+    # Encode the command instead of interpolating it into -Command: the quoted
+    # form is re-parsed by the child PowerShell and silently drops embedded
+    # double quotes (verified with run commands containing quoted paths).
+    $fullCommand = $command
+    if (-not [string]::IsNullOrEmpty($commandArgs)) {
+        $fullCommand = "$command $commandArgs"
+    }
+    $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($fullCommand))
+    $startInfo.Arguments = "-NoProfile -EncodedCommand $encodedCommand"
     $startInfo.WorkingDirectory = $env:USERPROFILE
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $wait
