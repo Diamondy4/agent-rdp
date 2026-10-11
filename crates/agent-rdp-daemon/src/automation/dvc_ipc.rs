@@ -160,7 +160,9 @@ impl DvcIpc {
                     );
                     anyhow::bail!(
                         "DVC channel appears to be dead ({} consecutive failures). \
-                        Please reconnect with --enable-win-automation.",
+                        The automation agent may have exited or be busy with a long \
+                        request; relaunch it inside the session, or reconnect with \
+                        --enable-win-automation.",
                         failures
                     );
                 }
@@ -180,7 +182,9 @@ impl DvcIpc {
                     );
                     anyhow::bail!(
                         "DVC channel appears to be dead ({} consecutive failures). \
-                        Please reconnect with --enable-win-automation.",
+                        The automation agent may have exited or be busy with a long \
+                        request; relaunch it inside the session, or reconnect with \
+                        --enable-win-automation.",
                         failures
                     );
                 }
