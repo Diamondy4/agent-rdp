@@ -61,4 +61,11 @@ public class WindowEnum {
         return true;
     }
 }
+
+public class Win32Message {
+    public const int WM_SETTEXT = 0x000C;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, string lParam);
+}
 "@

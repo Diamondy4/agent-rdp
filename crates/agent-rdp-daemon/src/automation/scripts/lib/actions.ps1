@@ -261,6 +261,17 @@ function Invoke-Get {
     return $result
 }
 
+# Classic Win32 text controls accept WM_SETTEXT but expose no ValuePattern.
+$script:TextEditClassPattern = '^(Edit|RichEdit|RICHEDIT|Scintilla|TextArea)'
+
+function Test-TextEditElement {
+    param([System.Windows.Automation.AutomationElement]$Element)
+
+    if ($Element.Current.NativeWindowHandle -eq 0) { return $false }
+
+    return ($Element.Current.ClassName -match $script:TextEditClassPattern)
+}
+
 function Invoke-Fill {
     param($Params)
 
@@ -278,6 +289,14 @@ function Invoke-Fill {
             return @{ filled = $true; text = $Params.text; method = "value_pattern" }
         }
     } catch {}
+
+    # Classic Win32 edit controls expose no ValuePattern but accept WM_SETTEXT,
+    # which is deterministic and independent of keyboard state. The SendKeys path
+    # below used to leave a stray character behind (verified on Notepad).
+    if (Test-TextEditElement $element) {
+        [Win32Message]::SendMessage([IntPtr]$element.Current.NativeWindowHandle, [Win32Message]::WM_SETTEXT, [IntPtr]::Zero, $Params.text) | Out-Null
+        return @{ filled = $true; text = $Params.text; method = "wm_settext" }
+    }
 
     # Fallback: select all and type
     [System.Windows.Forms.SendKeys]::SendWait("^a")
@@ -307,6 +326,11 @@ function Invoke-Clear {
             return @{ cleared = $true; method = "value_pattern" }
         }
     } catch {}
+
+    if (Test-TextEditElement $element) {
+        [Win32Message]::SendMessage([IntPtr]$element.Current.NativeWindowHandle, [Win32Message]::WM_SETTEXT, [IntPtr]::Zero, "") | Out-Null
+        return @{ cleared = $true; method = "wm_settext" }
+    }
 
     # Fallback: select all and delete
     [System.Windows.Forms.SendKeys]::SendWait("^a{DEL}")
