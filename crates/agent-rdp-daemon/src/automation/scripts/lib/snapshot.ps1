@@ -151,9 +151,17 @@ function Invoke-Snapshot {
 
     $truncatedReason = $null
 
+    if ($comSnapshot.PerWindow) {
+        Write-Log "COM walk used the per-window fallback: the desktop-wide cache build failed" "WARN"
+    }
+
     if ($comSnapshot.ProviderFailure) {
         $script:WasTruncated = $true
-        $truncatedReason = "a UI Automation provider failed (" + $comSnapshot.SkippedWindows + " subtree(s) missing)"
+        $missing = ""
+        if ($comSnapshot.SkippedNames -and $comSnapshot.SkippedNames.Count -gt 0) {
+            $missing = ": " + ($comSnapshot.SkippedNames -join "; ")
+        }
+        $truncatedReason = "a UI Automation provider failed (" + $comSnapshot.SkippedWindows + " subtree(s) missing" + $missing + ")"
     }
 
     if ($comSnapshot.Truncated) {

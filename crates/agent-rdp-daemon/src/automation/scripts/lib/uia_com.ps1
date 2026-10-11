@@ -63,6 +63,8 @@ public class UiaSnapshot {
     public int NodeCount;
     public bool ProviderFailure;
     public int SkippedWindows;
+    public string[] SkippedNames;
+    public bool PerWindow;
 }
 
 public enum UiaTreeScope { None = 0, Element = 1, Children = 2, Descendants = 4, Parent = 8, Ancestors = 16, Subtree = 7 }
@@ -277,6 +279,7 @@ public static class UiaComWalker {
         public bool ProviderFailure;
         public int SkippedWindows;
         public bool PerWindow;
+        public List<string> SkippedNames = new List<string>();
         public IUIAutomationCondition TrueCondition;
         public IUIAutomationCacheRequest SubtreeCache;
         public List<IUIAutomationElement> Elements;
@@ -370,6 +373,8 @@ public static class UiaComWalker {
         snapshot.Truncated = state.Truncated;
         snapshot.ProviderFailure = state.ProviderFailure;
         snapshot.SkippedWindows = state.SkippedWindows;
+        snapshot.SkippedNames = state.SkippedNames.ToArray();
+        snapshot.PerWindow = perWindow;
 
         // Publish only on completion: an abandoned (timed-out) walk must not
         // overwrite the element list of a newer one.
@@ -465,6 +470,14 @@ public static class UiaComWalker {
                         if (refreshed == null) {
                             state.ProviderFailure = true;
                             state.SkippedWindows++;
+                            // Name what is missing so the caller can fall back to the
+                            // visual layer for that window instead of guessing. A live
+                            // read can fail too; the parent cache usually still knows.
+                            string skippedName = null;
+                            try { object n = child.GetCurrentPropertyValue(PidName); if (n != null) { skippedName = n.ToString(); } } catch (Exception) { }
+                            if (string.IsNullOrEmpty(skippedName)) { skippedName = Str(child, PidName); }
+                            if (string.IsNullOrEmpty(skippedName)) { skippedName = "(unnamed)"; }
+                            if (state.SkippedNames.Count < 5) { state.SkippedNames.Add(skippedName); }
                             continue;
                         }
 
