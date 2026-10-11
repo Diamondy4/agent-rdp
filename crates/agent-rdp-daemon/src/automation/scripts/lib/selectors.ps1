@@ -1,184 +1,76 @@
-# selectors.ps1 - Element finding and selector parsing
+# selectors.ps1 - selector parsing and node lookup over the COM model
 
-# Search for element across ALL windows (not just RootElement descendants)
-function Find-ElementAcrossAllWindows {
-    param(
-        [System.Windows.Automation.Condition]$Condition
-    )
+# Find a node for a selector in a model. Returns @{ Node = ...; Path = ... } or null.
+# Forms: @ref (from the previous snapshot), #AutomationId, .ClassName, ~*name*,
+# role:Type[name], or an exact name.
+function Find-UiaNode {
+    param([string]$Selector, $Root)
 
-    # First try RootElement descendants (fast path)
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $result = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $Condition)
-    if ($result) { return $result }
+    if ([string]::IsNullOrEmpty($Selector)) { throw "Selector cannot be empty" }
 
-    # If not found, enumerate all windows and search each
-    $windowHandles = [WindowEnum]::GetAllWindows()
-    foreach ($hwnd in $windowHandles) {
-        try {
-            $windowElement = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
-            if ($windowElement) {
-                $result = $windowElement.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $Condition)
-                if ($result) { return $result }
-            }
-        } catch {
-            # Skip inaccessible windows
-        }
-    }
-
-    return $null
-}
-
-# Search with wildcard pattern across ALL windows
-function Find-ElementByPatternAcrossAllWindows {
-    param([string]$Pattern)
-
-    # First try RootElement descendants
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $allElements = $root.FindAll(
-        [System.Windows.Automation.TreeScope]::Descendants,
-        [System.Windows.Automation.Condition]::TrueCondition)
-
-    foreach ($elem in $allElements) {
-        if ($elem.Current.Name -like $Pattern) {
-            return $elem
-        }
-    }
-
-    # If not found, enumerate all windows
-    $windowHandles = [WindowEnum]::GetAllWindows()
-    foreach ($hwnd in $windowHandles) {
-        try {
-            $windowElement = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
-            if ($windowElement) {
-                $allElements = $windowElement.FindAll(
-                    [System.Windows.Automation.TreeScope]::Descendants,
-                    [System.Windows.Automation.Condition]::TrueCondition)
-                foreach ($elem in $allElements) {
-                    if ($elem.Current.Name -like $Pattern) {
-                        return $elem
-                    }
-                }
-            }
-        } catch {
-            # Skip inaccessible windows
-        }
-    }
-
-    return $null
-}
-
-# Search for Window elements only by wildcard pattern (for window operations)
-function Find-WindowByPattern {
-    param([string]$Pattern)
-
-    $root = [System.Windows.Automation.AutomationElement]::RootElement
-    $windowCondition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-        [System.Windows.Automation.ControlType]::Window)
-
-    # Search top-level windows first
-    $allWindows = $root.FindAll(
-        [System.Windows.Automation.TreeScope]::Children, $windowCondition)
-
-    foreach ($win in $allWindows) {
-        if ($win.Current.Name -like $Pattern) {
-            return $win
-        }
-    }
-
-    # Also search descendant windows (for child/dialog windows)
-    $allWindows = $root.FindAll(
-        [System.Windows.Automation.TreeScope]::Descendants, $windowCondition)
-
-    foreach ($win in $allWindows) {
-        if ($win.Current.Name -like $Pattern) {
-            return $win
-        }
-    }
-
-    return $null
-}
-
-function Find-Element {
-    param([string]$Selector)
-
-    if ([string]::IsNullOrEmpty($Selector)) {
-        throw "Selector cannot be empty"
-    }
-
-    # A bare prefix is always a malformed selector. Without this guard it fell
-    # through to a whole-desktop element search, which wedged the agent until it
-    # was relaunched (reproduced with a bare @).
+    # A bare prefix is always malformed; reject it instead of searching for it.
     if ($Selector -match '^[@#~.]$' -or $Selector -eq 'role:') {
         throw "Malformed selector: $Selector"
     }
 
-    # @ref or @eN - reference from snapshot (supports both @123 and @e123 formats)
     if ($Selector -match '^@e?(\d+)$') {
         $ref = [int]$Matches[1]
 
-        # Check if any snapshot has been taken
         if ($null -eq $script:SnapshotId -or $script:RefMap.Count -eq 0) {
-            throw "No snapshot taken. Run 'automate snapshot' first before using @ref selectors."
+            throw "No snapshot taken. Run automate snapshot first before using @ref selectors."
         }
 
         if (-not $script:RefMap.ContainsKey($ref)) {
             throw "Invalid ref: $Selector not found in snapshot (snapshot has $($script:RefMap.Count) elements, snapshot_id=$($script:SnapshotId))"
         }
 
-        $element = $script:RefMap[$ref]
+        $entry = $script:RefMap[$ref]
 
-        # Validate element is still accessible (UI may have changed)
-        try {
-            # Accessing any property will throw if element is stale
-            $null = $element.Current.ProcessId
-        } catch {
-            throw "Stale ref: $Selector - element no longer exists (UI has changed). Take a new snapshot."
+        Write-ComDebug ("ref @e" + $ref + " -> role=" + $entry["Role"] + " name=[" + $entry["Name"] + "] id=[" + $entry["AutomationId"] + "]")
+
+        return Find-UiaNodeInModel -Node $Root -Path @() -Match {
+            param($n)
+            return ($n.Role -eq $entry["Role"] -and
+                    [string]$n.Name -eq [string]$entry["Name"] -and
+                    [string]$n.AutomationId -eq [string]$entry["AutomationId"])
         }
-
-        return $element
     }
 
-    # #automationId - search across all windows
     if ($Selector -match '^#(.+)$') {
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::AutomationIdProperty, $Matches[1])
-        return Find-ElementAcrossAllWindows -Condition $condition
+        $automationId = $Matches[1]
+        return Find-UiaNodeInModel -Node $Root -Path @() -Match { param($n) return ($n.AutomationId -eq $automationId) }
     }
 
-    # .className - search across all windows
     if ($Selector -match '^\.(.+)$') {
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ClassNameProperty, $Matches[1])
-        return Find-ElementAcrossAllWindows -Condition $condition
+        $className = $Matches[1]
+        return Find-UiaNodeInModel -Node $Root -Path @() -Match { param($n) return ($n.ClassName -eq $className) }
     }
 
-    # ~pattern (wildcard name match) - search across all windows
     if ($Selector -match '^~(.+)$') {
-        return Find-ElementByPatternAcrossAllWindows -Pattern $Matches[1]
+        $namePattern = $Matches[1]
+        return Find-UiaNodeInModel -Node $Root -Path @() -Match { param($n) return ($n.Name -like $namePattern) }
     }
 
-    # role:type[name] - search across all windows
     if ($Selector -match '^role:(\w+)\[(.+)\]$') {
-        $role = $Matches[1]
-        $name = $Matches[2]
-
-        $controlType = [System.Windows.Automation.ControlType]::$role
-        if (-not $controlType) {
-            throw "Unknown control type: $role"
-        }
-
-        $typeCondition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty, $controlType)
-        $nameCondition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty, $name)
-        $condition = New-Object System.Windows.Automation.AndCondition($typeCondition, $nameCondition)
-
-        return Find-ElementAcrossAllWindows -Condition $condition
+        $roleName = $Matches[1]
+        $elementName = $Matches[2]
+        return Find-UiaNodeInModel -Node $Root -Path @() -Match { param($n) return ($n.Role -eq $roleName -and $n.Name -eq $elementName) }
     }
 
-    # Default: exact name match - search across all windows
-    $condition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::NameProperty, $Selector)
-    return Find-ElementAcrossAllWindows -Condition $condition
+    return Find-UiaNodeInModel -Node $Root -Path @() -Match { param($n) return ($n.Name -eq $Selector) }
+}
+
+# Resolve a selector against a fresh walk. The node carries Id, which addresses the
+# element that walk stored, so actions use COM patterns on it.
+function Find-UiaNodeTarget {
+    param([string]$Selector)
+
+    $model = Get-UiaModel
+    $match = Find-UiaNode -Selector $Selector -Root $model
+
+    if ($null -eq $match) { throw "Element not found: $Selector" }
+
+    Write-ComDebug ("selector " + $Selector + " -> id=" + $match["Node"].Id + " role=" + $match["Node"].Role + " name=[" + $match["Node"].Name + "]")
+
+    return $match
 }

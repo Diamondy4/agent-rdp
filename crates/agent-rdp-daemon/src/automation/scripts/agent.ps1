@@ -13,11 +13,6 @@ param(
 # Set window title for easy identification
 $Host.UI.RawUI.WindowTitle = "agent-rdp automation"
 
-# Load UI Automation assemblies
-Add-Type -AssemblyName UIAutomationClient
-Add-Type -AssemblyName UIAutomationTypes
-Add-Type -AssemblyName System.Windows.Forms
-
 # Global state
 $script:RefMap = @{}  # ref number -> AutomationElement mapping
 $script:SnapshotId = $null
@@ -53,6 +48,7 @@ $scriptDir = $PSScriptRoot
 . "$scriptDir\lib\selectors.ps1"
 . "$scriptDir\lib\actions.ps1"
 . "$scriptDir\lib\dvc.ps1"
+. "$scriptDir\lib\uia_com.ps1"
 
 # ============ MAIN LOOP ============
 

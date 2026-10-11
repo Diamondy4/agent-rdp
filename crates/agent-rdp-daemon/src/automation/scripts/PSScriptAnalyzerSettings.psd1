@@ -6,7 +6,7 @@
         # that may not be supported by all elements (e.g., ValuePattern, TogglePattern)
         'PSAvoidUsingEmptyCatchBlock',
 
-        # Functions like Get-ElementStates and Get-SupportedPatterns return collections,
+        # Helper functions that return collections (for example the model lookups),
         # so plural nouns are semantically correct
         'PSUseSingularNouns',
 

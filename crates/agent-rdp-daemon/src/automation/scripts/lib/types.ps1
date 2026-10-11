@@ -9,6 +9,12 @@ public class MouseInput {
     [DllImport("user32.dll")]
     public static extern void mouse_event(int dwFlags, int dx, int dy, int dwData, int dwExtraInfo);
 
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
     public const int MOUSEEVENTF_LEFTDOWN = 0x0002;
     public const int MOUSEEVENTF_LEFTUP = 0x0004;
     public const int MOUSEEVENTF_RIGHTDOWN = 0x0008;
@@ -35,30 +41,6 @@ public class MouseInput {
         LeftClick();
         System.Threading.Thread.Sleep(50);
         LeftClick();
-    }
-}
-
-public class WindowEnum {
-    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-    [DllImport("user32.dll")]
-    public static extern bool IsWindowVisible(IntPtr hWnd);
-
-    private static List<IntPtr> windowHandles;
-
-    public static IntPtr[] GetAllWindows() {
-        windowHandles = new List<IntPtr>();
-        EnumWindows(EnumWindowCallback, IntPtr.Zero);
-        return windowHandles.ToArray();
-    }
-
-    private static bool EnumWindowCallback(IntPtr hWnd, IntPtr lParam) {
-        // Include all windows, even invisible ones (some popups may not be "visible")
-        windowHandles.Add(hWnd);
-        return true;
     }
 }
 

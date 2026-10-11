@@ -1,459 +1,202 @@
-# actions.ps1 - All automation action functions using native UI Automation patterns
+# actions.ps1 - UI Automation actions
+#
+# Every action resolves its target through the COM model (selectors.ps1 /
+# uia_com.ps1) and then acts through the COM pattern API on the node id. Pointer
+# actions (click, context menu) use a position taken from the node's own rectangle.
+
+function Invoke-Focus {
+    param($Params)
+
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    [UiaComWalker]::FocusElement($target["Node"].Id)
+
+    return @{ focused = $true }
+}
 
 function Invoke-Click {
     param($Params)
 
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    $node = $target["Node"]
 
-    # Verify element still exists before interacting
-    try {
-        $null = $element.Current.ProcessId
-    } catch {
-        throw "Element no longer exists (window may have closed)"
-    }
-
-    # Check if element is enabled
-    if (-not $element.Current.IsEnabled) {
-        throw "Element is disabled"
-    }
-
-    # Use mouse click via SendInput for reliable, non-blocking interaction.
+    if (-not $node.Enabled) { throw "Element is disabled" }
 
     $doubleClick = if ($null -ne $Params.double_click) { $Params.double_click } else { $false }
 
-    # Get the element's bounding rectangle
-    $rect = $element.Current.BoundingRectangle
-    if ($rect.IsEmpty -or [double]::IsInfinity($rect.X)) {
+    # Pointer actions need a position; it comes from the node's own rectangle.
+    $point = Get-UiaNodeClickPoint $node
+    if ($null -eq $point) {
         throw "Element has no valid bounding rectangle (may be off-screen or invisible)"
     }
 
-    $centerX = [int]($rect.X + $rect.Width / 2)
-    $centerY = [int]($rect.Y + $rect.Height / 2)
-
-    # Add Win32 mouse input type if not already defined
-    if (-not ([System.Management.Automation.PSTypeName]'InvokeMouse').Type) {
-        Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-public class InvokeMouse {
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int x, int y);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
-
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-}
-"@
-    }
-
-    # Move cursor to element center
-    $null = [InvokeMouse]::SetCursorPos($centerX, $centerY)
-    Start-Sleep -Milliseconds 30
-
-    # Perform click(s)
-    [InvokeMouse]::mouse_event([InvokeMouse]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 30
-    [InvokeMouse]::mouse_event([InvokeMouse]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+    [void][MouseInput]::SetCursorPos($point["x"], $point["y"])
+    Start-Sleep -Milliseconds 50
 
     if ($doubleClick) {
-        Start-Sleep -Milliseconds 50
-        [InvokeMouse]::mouse_event([InvokeMouse]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-        Start-Sleep -Milliseconds 30
-        [InvokeMouse]::mouse_event([InvokeMouse]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [UIntPtr]::Zero)
+        [MouseInput]::DoubleClick()
+    } else {
+        [MouseInput]::LeftClick()
     }
 
-    $method = if ($doubleClick) { "double_click" } else { "click" }
-
-    return @{
-        clicked = $true
-        method = $method
-        x = $centerX
-        y = $centerY
-    }
-}
-
-function Invoke-Expand {
-    param($Params)
-
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
-
-    try {
-        $expandPattern = $element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
-        if ($expandPattern) {
-            $expandPattern.Expand()
-            return @{ expanded = $true; method = "ExpandCollapsePattern" }
-        }
-    } catch {
-        throw "Element does not support ExpandCollapsePattern: $($_.Exception.Message)"
-    }
-
-    throw "Element does not support ExpandCollapsePattern"
-}
-
-function Invoke-Collapse {
-    param($Params)
-
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
-
-    try {
-        $expandPattern = $element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
-        if ($expandPattern) {
-            $expandPattern.Collapse()
-            return @{ collapsed = $true; method = "ExpandCollapsePattern" }
-        }
-    } catch {
-        throw "Element does not support ExpandCollapsePattern: $($_.Exception.Message)"
-    }
-
-    throw "Element does not support ExpandCollapsePattern"
+    return @{ clicked = $true; x = $point["x"]; y = $point["y"]; double_click = $doubleClick }
 }
 
 function Invoke-ContextMenu {
     param($Params)
 
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
+    $target = Find-UiaNodeTarget -Selector $Params.selector
 
-    # Get the element's bounding rectangle and calculate center point
-    $rect = $element.Current.BoundingRectangle
-    if ($rect.IsEmpty) {
-        throw "Element has no bounding rectangle (may be off-screen or invisible)"
+    $point = Get-UiaNodeClickPoint $target["Node"]
+    if ($null -eq $point) {
+        throw "Element has no valid bounding rectangle (may be off-screen or invisible)"
     }
 
-    $centerX = [int]($rect.X + $rect.Width / 2)
-    $centerY = [int]($rect.Y + $rect.Height / 2)
+    [void][MouseInput]::SetCursorPos($point["x"], $point["y"])
+  Start-Sleep -Milliseconds 50
+    [MouseInput]::RightClick()
 
-    # Add Win32 mouse input type if not already defined
-    if (-not ([System.Management.Automation.PSTypeName]'ContextMenuMouse').Type) {
-        Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-public class ContextMenuMouse {
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int x, int y);
-
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
-
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-}
-"@
-    }
-
-    # Move cursor to element center
-    [ContextMenuMouse]::SetCursorPos($centerX, $centerY)
-    Start-Sleep -Milliseconds 50
-
-    # Perform right-click
-    [ContextMenuMouse]::mouse_event([ContextMenuMouse]::MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, [UIntPtr]::Zero)
-    Start-Sleep -Milliseconds 50
-    [ContextMenuMouse]::mouse_event([ContextMenuMouse]::MOUSEEVENTF_RIGHTUP, 0, 0, 0, [UIntPtr]::Zero)
-
-    return @{
-        context_menu_opened = $true
-        method = "mouse_right_click"
-        x = $centerX
-        y = $centerY
-    }
+    return @{ context_menu = $true; x = $point["x"]; y = $point["y"] }
 }
 
-function Invoke-Toggle {
-    param($Params)
+# Classic Win32 text controls accept WM_SETTEXT; used when the node exposes no
+# value pattern (the COM call then throws).
+function Set-UiaTextFallback {
+    param($Node, [string]$Text)
 
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
+    if ($Node.NativeWindowHandle -eq 0) { return $false }
+    if ($Node.ClassName -notmatch '^(Edit|RichEdit|RICHEDIT|Scintilla|TextArea)') { return $false }
 
-    try {
-        $togglePattern = $element.GetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern)
-        if ($togglePattern) {
-            $previousState = $togglePattern.Current.ToggleState
+    [void][Win32Message]::SendMessage([IntPtr]$Node.NativeWindowHandle, [Win32Message]::WM_SETTEXT, [IntPtr]::Zero, $Text)
 
-            # If a specific state is requested
-            if ($null -ne $Params.state) {
-                $targetState = if ($Params.state) {
-                    [System.Windows.Automation.ToggleState]::On
-                } else {
-                    [System.Windows.Automation.ToggleState]::Off
-                }
-
-                # Toggle until we reach the target state (handles tri-state checkboxes)
-                $maxAttempts = 3
-                for ($i = 0; $i -lt $maxAttempts -and $togglePattern.Current.ToggleState -ne $targetState; $i++) {
-                    $togglePattern.Toggle()
-                    Start-Sleep -Milliseconds 50
-                }
-            } else {
-                # Just toggle
-                $togglePattern.Toggle()
-            }
-
-            return @{
-                toggled = $true
-                previous_state = $previousState.ToString()
-                new_state = $togglePattern.Current.ToggleState.ToString()
-                method = "TogglePattern"
-            }
-        }
-    } catch {
-        throw "Element does not support TogglePattern: $($_.Exception.Message)"
-    }
-
-    throw "Element does not support TogglePattern"
-}
-
-function Invoke-Focus {
-    param($Params)
-
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
-
-    $element.SetFocus()
-
-    return @{ focused = $true }
-}
-
-function Invoke-Get {
-    param($Params)
-
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
-
-    $property = if ($Params.property) { $Params.property } else { "all" }
-    $result = @{}
-
-    if ($property -eq "all" -or $property -eq "name") {
-        $result["name"] = $element.Current.Name
-    }
-
-    if ($property -eq "all" -or $property -eq "value") {
-        try {
-            $valuePattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-            if ($valuePattern) {
-                $result["value"] = $valuePattern.Current.Value
-            }
-        } catch {
-            $result["value"] = $null
-        }
-    }
-
-    if ($property -eq "all" -or $property -eq "states") {
-        $result["states"] = @(Get-ElementStates $element)
-    }
-
-    if ($property -eq "all" -or $property -eq "bounds") {
-        $rect = $element.Current.BoundingRectangle
-        $result["bounds"] = @{
-            x = ConvertTo-SafeInt32 $rect.X
-            y = ConvertTo-SafeInt32 $rect.Y
-            width = ConvertTo-SafeInt32 $rect.Width
-            height = ConvertTo-SafeInt32 $rect.Height
-        }
-    }
-
-    return $result
-}
-
-# Classic Win32 text controls accept WM_SETTEXT but expose no ValuePattern.
-$script:TextEditClassPattern = '^(Edit|RichEdit|RICHEDIT|Scintilla|TextArea)'
-
-function Test-TextEditElement {
-    param([System.Windows.Automation.AutomationElement]$Element)
-
-    if ($Element.Current.NativeWindowHandle -eq 0) { return $false }
-
-    return ($Element.Current.ClassName -match $script:TextEditClassPattern)
+    return $true
 }
 
 function Invoke-Fill {
     param($Params)
 
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    $node = $target["Node"]
 
-    $element.SetFocus()
-    Start-Sleep -Milliseconds 50
-
-    # Try ValuePattern first
     try {
-        $valuePattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-        if ($valuePattern) {
-            $valuePattern.SetValue($Params.text)
-            return @{ filled = $true; text = $Params.text; method = "value_pattern" }
-        }
-    } catch {}
-
-    # Classic Win32 edit controls expose no ValuePattern but accept WM_SETTEXT,
-    # which is deterministic and independent of keyboard state. The SendKeys path
-    # below used to leave a stray character behind (verified on Notepad).
-    if (Test-TextEditElement $element) {
-        [Win32Message]::SendMessage([IntPtr]$element.Current.NativeWindowHandle, [Win32Message]::WM_SETTEXT, [IntPtr]::Zero, $Params.text) | Out-Null
-        return @{ filled = $true; text = $Params.text; method = "wm_settext" }
+        [UiaComWalker]::SetElementValue($node.Id, $Params.text)
+    } catch {
+        if (-not (Set-UiaTextFallback -Node $node -Text $Params.text)) { throw }
     }
 
-    # Fallback: select all and type
-    [System.Windows.Forms.SendKeys]::SendWait("^a")
-    Start-Sleep -Milliseconds 50
-
-    # Escape special characters for SendKeys
-    $escaped = $Params.text -replace '([+^%~(){}])', '{$1}'
-    [System.Windows.Forms.SendKeys]::SendWait($escaped)
-
-    return @{ filled = $true; text = $Params.text; method = "sendkeys" }
+    return @{ filled = $true; text = $Params.text }
 }
 
 function Invoke-Clear {
     param($Params)
 
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    $node = $target["Node"]
 
-    $element.SetFocus()
-    Start-Sleep -Milliseconds 50
-
-    # Try ValuePattern first
     try {
-        $valuePattern = $element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-        if ($valuePattern) {
-            $valuePattern.SetValue("")
-            return @{ cleared = $true; method = "value_pattern" }
-        }
-    } catch {}
-
-    if (Test-TextEditElement $element) {
-        [Win32Message]::SendMessage([IntPtr]$element.Current.NativeWindowHandle, [Win32Message]::WM_SETTEXT, [IntPtr]::Zero, "") | Out-Null
-        return @{ cleared = $true; method = "wm_settext" }
+        [UiaComWalker]::ClearElementValue($node.Id)
+    } catch {
+        if (-not (Set-UiaTextFallback -Node $node -Text "")) { throw }
     }
 
-    # Fallback: select all and delete
-    [System.Windows.Forms.SendKeys]::SendWait("^a{DEL}")
+    return @{ cleared = $true }
+}
 
-    return @{ cleared = $true; method = "sendkeys" }
+function Invoke-Toggle {
+    param($Params)
+
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+
+    $desired = -1
+    if ($null -ne $Params.state) { if ($Params.state) { $desired = 1 } else { $desired = 0 } }
+
+    [UiaComWalker]::ToggleElement($target["Node"].Id, $desired)
+
+    return @{ toggled = $true; method = "TogglePattern" }
 }
 
 function Invoke-Select {
     param($Params)
 
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
+    $target = Find-UiaNodeTarget -Selector $Params.selector
 
-    # If no item name specified, select the element directly using SelectionItemPattern
     if (-not $Params.item) {
-        try {
-            $selectPattern = $element.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-            if ($selectPattern) {
-                $selectPattern.Select()
-                return @{ selected = $true; method = "SelectionItemPattern" }
-            }
-        } catch {
-            throw "Element does not support SelectionItemPattern: $($_.Exception.Message)"
-        }
-        throw "Element does not support SelectionItemPattern"
+        [UiaComWalker]::SelectElement($target["Node"].Id)
+        return @{ selected = $true; method = "SelectionItemPattern" }
     }
 
-    # Item name specified - find and select within container
-    # Try SelectionItemPattern first
-    try {
-        $itemCondition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::NameProperty, $Params.item)
-        $item = $element.FindFirst(
-            [System.Windows.Automation.TreeScope]::Descendants, $itemCondition)
-
-        if ($item) {
-            $selectPattern = $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-            if ($selectPattern) {
-                $selectPattern.Select()
-                return @{ selected = $true; item = $Params.item; method = "SelectionItemPattern" }
-            }
+    # Item by name: select it inside the container, opening the container first when
+    # the item only exists while it is expanded (combo boxes).
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $item = Find-UiaNodeInModel -Node $target["Node"] -Path @() -Match { param($n) return ($n.Name -eq $Params.item) }
+        if ($null -ne $item) {
+            [UiaComWalker]::SelectElement($item["Node"].Id)
+            return @{ selected = $true; item = $Params.item; method = "SelectionItemPattern" }
         }
-    } catch {}
 
-    # Try ExpandCollapsePattern for combo boxes - expand first, then find item
-    try {
-        $expandPattern = $element.GetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern)
-        if ($expandPattern) {
-            $expandPattern.Expand()
-            Start-Sleep -Milliseconds 200
-
-            # Now find and select the item
-            $itemCondition = New-Object System.Windows.Automation.PropertyCondition(
-                [System.Windows.Automation.AutomationElement]::NameProperty, $Params.item)
-            $item = $element.FindFirst(
-                [System.Windows.Automation.TreeScope]::Descendants, $itemCondition)
-
-            if ($item) {
-                # Try SelectionItemPattern first
-                try {
-                    $selectPattern = $item.GetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern)
-                    if ($selectPattern) {
-                        $selectPattern.Select()
-                        return @{ selected = $true; item = $Params.item; method = "ExpandCollapse+SelectionItemPattern" }
-                    }
-                } catch {}
-
-                # Try InvokePattern
-                try {
-                    $invokePattern = $item.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
-                    if ($invokePattern) {
-                        $invokePattern.Invoke()
-                        return @{ selected = $true; item = $Params.item; method = "ExpandCollapse+InvokePattern" }
-                    }
-                } catch {}
-            }
+        if ($attempt -eq 0) {
+            # Opening the container is an optional aid for combo boxes; a container
+            # without ExpandCollapsePattern just goes straight to the retry.
+            try { [UiaComWalker]::SetElementExpanded($target["Node"].Id, $true) } catch {}
+            Start-Sleep -Milliseconds 250
+            $target = Find-UiaNodeTarget -Selector $Params.selector
         }
-    } catch {}
+    }
 
-    throw "Could not select item: $($Params.item)"
+    throw "Item not found in container: $($Params.item)"
+}
+
+function Invoke-Expand {
+    param($Params)
+
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    [UiaComWalker]::SetElementExpanded($target["Node"].Id, $true)
+
+    return @{ expanded = $true; method = "ExpandCollapsePattern" }
+}
+
+function Invoke-Collapse {
+    param($Params)
+
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    [UiaComWalker]::SetElementExpanded($target["Node"].Id, $false)
+
+    return @{ collapsed = $true; method = "ExpandCollapsePattern" }
 }
 
 function Invoke-Scroll {
     param($Params)
 
-    $element = Find-Element -Selector $Params.selector
-    if (-not $element) { throw "Element not found: $($Params.selector)" }
-
-    # If to_child is specified, scroll until that child is visible
     if ($Params.to_child) {
-        $child = Find-Element -Selector $Params.to_child
-        if ($child) {
-            try {
-                $scrollItemPattern = $child.GetCurrentPattern([System.Windows.Automation.ScrollItemPattern]::Pattern)
-                if ($scrollItemPattern) {
-                    $scrollItemPattern.ScrollIntoView()
-                    return @{ scrolled = $true; to_child = $Params.to_child }
-                }
-            } catch {}
-        }
+        $child = Find-UiaNodeTarget -Selector $Params.to_child
+        [UiaComWalker]::ScrollElementIntoView($child["Node"].Id)
+        return @{ scrolled = $true; to_child = $Params.to_child }
     }
 
-    # Try ScrollPattern
-    try {
-        $scrollPattern = $element.GetCurrentPattern([System.Windows.Automation.ScrollPattern]::Pattern)
-        if ($scrollPattern) {
-            $amount = if ($Params.amount) { [int]$Params.amount } else { 1 }
-            $direction = if ($Params.direction) { $Params.direction } else { "down" }
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    $amount = if ($Params.amount) { [int]$Params.amount } else { 1 }
+    $direction = if ($Params.direction) { $Params.direction } else { "down" }
 
-            for ($i = 0; $i -lt $amount; $i++) {
-                switch ($direction) {
-                    "up" { $scrollPattern.ScrollVertical([System.Windows.Automation.ScrollAmount]::SmallDecrement) }
-                    "down" { $scrollPattern.ScrollVertical([System.Windows.Automation.ScrollAmount]::SmallIncrement) }
-                    "left" { $scrollPattern.ScrollHorizontal([System.Windows.Automation.ScrollAmount]::SmallDecrement) }
-                    "right" { $scrollPattern.ScrollHorizontal([System.Windows.Automation.ScrollAmount]::SmallIncrement) }
-                }
-            }
+    [UiaComWalker]::ScrollElement($target["Node"].Id, $direction, $amount)
 
-            return @{ scrolled = $true; direction = $direction; amount = $amount }
-        }
-    } catch {}
+    return @{ scrolled = $true; direction = $direction; amount = $amount }
+}
+# Resolve a window selector (or the foreground window) to a node in a fresh walk.
+function Find-UiaWindowNode {
+    param($Selector)
 
-    throw "Element does not support scrolling"
+    $model = Get-UiaModel
+
+    if ($Selector) {
+        $match = Find-UiaNode -Selector $Selector -Root $model
+        if ($null -eq $match) { throw "Window not found: $Selector" }
+        return $match["Node"]
+    }
+
+    $foreground = [MouseInput]::GetForegroundWindow().ToInt64()
+    $match = Find-UiaNodeInModel -Node $model -Path @() -Match { param($n) return ([int64]$n.NativeWindowHandle -eq $foreground) }
+    if ($null -eq $match) { throw "Foreground window not found in the accessibility tree" }
+
+    return $match["Node"]
 }
 
 function Invoke-Window {
@@ -462,96 +205,99 @@ function Invoke-Window {
     $action = $Params.action
 
     if ($action -eq "list") {
+        # Top-level windows come from a fresh walk's model.
+        $model = Get-UiaModel
         $windows = @()
-        $root = [System.Windows.Automation.AutomationElement]::RootElement
 
-        $condition = New-Object System.Windows.Automation.PropertyCondition(
-            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
-            [System.Windows.Automation.ControlType]::Window)
+        foreach ($node in $model.Children) {
+            if ($node.Role -ne "Window") { continue }
 
-        $windowElements = $root.FindAll(
-            [System.Windows.Automation.TreeScope]::Children, $condition)
+            $bounds = Get-UiaNodeBounds $node
+            if ($null -eq $bounds) { $bounds = @{ x = -1; y = -1; width = -1; height = -1 } }
 
-        foreach ($win in $windowElements) {
-            $rect = $win.Current.BoundingRectangle
             $windows += @{
-                title = $win.Current.Name
-                process_id = $win.Current.ProcessId
-                bounds = @{
-                    x = ConvertTo-SafeInt32 $rect.X
-                    y = ConvertTo-SafeInt32 $rect.Y
-                    width = ConvertTo-SafeInt32 $rect.Width
-                    height = ConvertTo-SafeInt32 $rect.Height
-                }
+                title = $node.Name
+                process_id = $node.ProcessId
+                bounds = $bounds
+                minimized = ($node.WindowVisualState -eq 2)
+                maximized = ($node.WindowVisualState -eq 1)
             }
         }
 
         return @{ windows = $windows }
     }
 
-    # For other actions, find the window
-    $window = $null
-    if ($Params.selector) {
-        # Use window-specific search for wildcard patterns
-        if ($Params.selector -match '^~(.+)$') {
-            $window = Find-WindowByPattern -Pattern $Matches[1]
-        } else {
-            $window = Find-Element -Selector $Params.selector
-        }
-    } else {
-        # Get foreground window
-        Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-public class Win32 {
-    [DllImport("user32.dll")]
-    public static extern IntPtr GetForegroundWindow();
-}
-"@
-        $hwnd = [Win32]::GetForegroundWindow()
-        $window = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
-    }
-
-    if (-not $window) {
-        throw "Window not found"
-    }
+    $window = Find-UiaWindowNode -Selector $Params.selector
 
     switch ($action) {
         "focus" {
-            $window.SetFocus()
+            [UiaComWalker]::FocusElement($window.Id)
             return @{ action = "focus"; success = $true }
         }
         "maximize" {
-            $windowPattern = $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
-            if ($windowPattern) {
-                $windowPattern.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Maximized)
-                return @{ action = "maximize"; success = $true }
-            }
+            [UiaComWalker]::SetElementWindowState($window.Id, 1)
+            return @{ action = "maximize"; success = $true }
         }
         "minimize" {
-            $windowPattern = $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
-            if ($windowPattern) {
-                $windowPattern.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Minimized)
-                return @{ action = "minimize"; success = $true }
-            }
+            [UiaComWalker]::SetElementWindowState($window.Id, 2)
+            return @{ action = "minimize"; success = $true }
         }
         "restore" {
-            $windowPattern = $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
-            if ($windowPattern) {
-                $windowPattern.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Normal)
-                return @{ action = "restore"; success = $true }
-            }
+            [UiaComWalker]::SetElementWindowState($window.Id, 0)
+            return @{ action = "restore"; success = $true }
         }
         "close" {
-            $windowPattern = $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
-            if ($windowPattern) {
-                $windowPattern.Close()
-                return @{ action = "close"; success = $true }
-            }
+            [UiaComWalker]::CloseElementWindow($window.Id)
+            return @{ action = "close"; success = $true }
         }
     }
 
-    throw "Window action failed: $action"
+    throw "Unknown window action: $action"
+}
+
+function Invoke-WaitFor {
+    param($Params)
+
+    $selector = $Params.selector
+    $timeout = if ($Params.timeout_ms) { [int]$Params.timeout_ms } else { 30000 }
+    $state = if ($Params.state) { $Params.state } else { "visible" }
+
+    $startTime = Get-Date
+
+    while ($true) {
+        $elapsed = ((Get-Date) - $startTime).TotalMilliseconds
+        if ($elapsed -gt $timeout) {
+            throw "Timeout waiting for element: $selector (state: $state)"
+        }
+
+        # Heartbeat while polling: wait_for can run for tens of seconds and the
+        # daemon must not read that as a dead agent.
+        if ($null -eq $script:LastProgressAt -or ((Get-Date) - $script:LastProgressAt).TotalMilliseconds -gt 1000) {
+            $script:LastProgressAt = Get-Date
+            Send-DvcProgress -Handle $script:DvcHandle -Id $script:CurrentRequestId -Phase "wait_for" -ElapsedMs ([int]$elapsed)
+        }
+
+        $match = $null
+        try {
+            # Shallow walks keep polling affordable.
+            $model = Get-UiaModel -MaxDepth 8
+            $match = Find-UiaNode -Selector $selector -Root $model
+        } catch {}
+
+        switch ($state) {
+            "visible" {
+                if ($null -ne $match -and -not $match["Node"].Offscreen) { return @{ found = $true; state = $state; elapsed_ms = [int]$elapsed } }
+            }
+            "enabled" {
+                if ($null -ne $match -and $match["Node"].Enabled) { return @{ found = $true; state = $state; elapsed_ms = [int]$elapsed } }
+            }
+            "gone" {
+                if ($null -eq $match) { return @{ found = $true; state = $state; elapsed_ms = [int]$elapsed } }
+            }
+        }
+
+        Start-Sleep -Milliseconds 250
+    }
 }
 
 function Invoke-Run {
@@ -565,9 +311,9 @@ function Invoke-Run {
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = "powershell.exe"
-    # Encode the command instead of interpolating it into -Command: the quoted
-    # form is re-parsed by the child PowerShell and silently drops embedded
-    # double quotes (verified with run commands containing quoted paths).
+
+    # Pass the command verbatim: quoting it inside -Command re-parses the text and
+    # silently drops embedded double quotes, so encode it as UTF-16LE base64.
     $fullCommand = $command
     if (-not [string]::IsNullOrEmpty($commandArgs)) {
         $fullCommand = "$command $commandArgs"
@@ -583,14 +329,14 @@ function Invoke-Run {
     $process = [System.Diagnostics.Process]::Start($startInfo)
 
     if ($wait) {
-        # Use async reading to avoid deadlock when buffer fills
         $stdoutTask = $process.StandardOutput.ReadToEndAsync()
         $stderrTask = $process.StandardError.ReadToEndAsync()
 
-        $exited = $process.WaitForExit($timeoutMs)
-        # Wait in short slices so a long-running command can send heartbeats;
-        # the overall budget behaves exactly as before.
+        # Wait in short slices so a long-running command can send heartbeats; the
+        # overall budget behaves exactly as before.
         $runStart = Get-Date
+        $exited = $false
+
         while (-not $process.WaitForExit(250)) {
             $elapsedRun = ((Get-Date) - $runStart).TotalMilliseconds
 
@@ -608,7 +354,6 @@ function Invoke-Run {
             throw "Process timed out after $timeoutMs ms and was killed"
         }
 
-        # Wait for async reads to complete (with short timeout since process exited)
         [void]$stdoutTask.Wait(5000)
         [void]$stderrTask.Wait(5000)
 
@@ -624,54 +369,30 @@ function Invoke-Run {
     }
 }
 
-function Invoke-WaitFor {
+function Invoke-Get {
     param($Params)
 
-    $selector = $Params.selector
-    $timeout = if ($Params.timeout_ms) { [int]$Params.timeout_ms } else { 30000 }
-    $state = if ($Params.state) { $Params.state } else { "visible" }
+    # Reads come straight from a fresh walk's model node - no live element needed.
+    $target = Find-UiaNodeTarget -Selector $Params.selector
+    $node = $target["Node"]
 
-    $startTime = Get-Date
-    $pollInterval = 100  # ms
+    $property = if ($Params.property) { $Params.property } else { "all" }
+    $result = @{}
 
-    while ($true) {
-        $elapsed = ((Get-Date) - $startTime).TotalMilliseconds
-        if ($elapsed -gt $timeout) {
-            throw "Timeout waiting for element: $selector (state: $state)"
-        }
+    if ($property -eq "all" -or $property -eq "name") { $result["name"] = $node.Name }
+    if ($property -eq "all" -or $property -eq "value") { $result["value"] = $node.Value }
 
-        # Heartbeat while polling: wait_for can legitimately run for tens of
-        # seconds, and the daemon must not read that as a dead agent.
-        if ($null -eq $script:LastProgressAt -or ((Get-Date) - $script:LastProgressAt).TotalMilliseconds -gt 1000) {
-            $script:LastProgressAt = Get-Date
-            Send-DvcProgress -Handle $script:DvcHandle -Id $script:CurrentRequestId -Phase "wait_for" -ElapsedMs ([int]$elapsed)
-        }
-
-        $element = $null
-        try {
-            $element = Find-Element -Selector $selector
-        } catch {}
-
-        switch ($state) {
-            "visible" {
-                if ($element -and -not $element.Current.IsOffscreen) {
-                    return @{ found = $true; state = $state; elapsed_ms = [int]$elapsed }
-                }
-            }
-            "enabled" {
-                if ($element -and $element.Current.IsEnabled) {
-                    return @{ found = $true; state = $state; elapsed_ms = [int]$elapsed }
-                }
-            }
-            "gone" {
-                if (-not $element) {
-                    return @{ found = $true; state = $state; elapsed_ms = [int]$elapsed }
-                }
-            }
-        }
-
-        Start-Sleep -Milliseconds $pollInterval
+    if ($property -eq "all" -or $property -eq "states") {
+        $result["states"] = @(Get-UiaNodeStates $node)
     }
+
+    if ($property -eq "all" -or $property -eq "bounds") {
+        $bounds = Get-UiaNodeBounds $node
+        if ($null -ne $bounds) { $result["bounds"] = $bounds }
+        else { $result["bounds"] = @{ x = -1; y = -1; width = -1; height = -1 } }
+    }
+
+    return $result
 }
 
 function Get-AgentStatus {

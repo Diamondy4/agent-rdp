@@ -1,32 +1,8 @@
-# snapshot.ps1 - Accessibility tree snapshot and element state functions
+# snapshot.ps1 - accessibility tree snapshots: walk (COM), render, refs
 
 # Interactive patterns - elements with these can be interacted with
 $script:InteractivePatterns = @("invoke", "value", "toggle", "selectionitem", "expandcollapse", "rangevalue", "scroll")
 
-# Cloaked or minimized windows can report infinite (or NaN) rectangles; casting
-# those to [int] throws an Int32 overflow, so bounds are normalized instead.
-function Test-FiniteRect {
-    param($Rect)
-
-    foreach ($value in @($Rect.X, $Rect.Y, $Rect.Width, $Rect.Height)) {
-        $number = [double]$value
-        if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $false }
-    }
-
-    return $true
-}
-
-function ConvertTo-SafeInt32 {
-    param([double]$Value)
-
-    if ([double]::IsNaN($Value) -or [double]::IsInfinity($Value)) { return -1 }
-
-    return [int]$Value
-}
-
-# Budgets that keep pathological accessibility trees (large Chromium/Electron
-# web content) from hanging the agent: the traversal stops once either limit is
-# reached and reports truncated = true.
 function Get-SnapshotBudget {
     param([string]$Name, [int]$Default)
 
@@ -39,84 +15,11 @@ function Get-SnapshotBudget {
     return $Default
 }
 
-# Override per host with AGENT_RDP_SNAPSHOT_MAX_NODES / AGENT_RDP_SNAPSHOT_MAX_SECONDS;
-# raise the time budget only once the daemon's DVC request timeout is raised too.
-$script:MaxSnapshotNodes = Get-SnapshotBudget 'AGENT_RDP_SNAPSHOT_MAX_NODES' 8000
-# Keep the time budget below the daemon's 10 s DVC request timeout, otherwise a
-# slow traversal is reported as a dead channel instead of a truncated snapshot.
+# Budgets that keep pathological trees from running away. The walk stops once
+# either limit is reached and reports truncated = true with the reason.
+# Override per host with AGENT_RDP_SNAPSHOT_MAX_NODES / AGENT_RDP_SNAPSHOT_MAX_SECONDS.
+$script:MaxSnapshotNodes = Get-SnapshotBudget 'AGENT_RDP_SNAPSHOT_MAX_NODES' 20000
 $script:MaxSnapshotSeconds = Get-SnapshotBudget 'AGENT_RDP_SNAPSHOT_MAX_SECONDS' 6
-
-function Get-ElementStates {
-    param(
-        [System.Windows.Automation.AutomationElement]$Element,
-        [string[]]$Patterns = $null
-    )
-
-    if ($null -eq $Patterns) { $Patterns = @(Get-SupportedPatterns $Element) }
-
-    $states = @()
-    $current = $Element.Current
-
-    if ($current.IsEnabled) { $states += "enabled" }
-    if ($current.IsKeyboardFocusable) { $states += "focusable" }
-    if ($current.HasKeyboardFocus) { $states += "focused" }
-    if ($current.IsOffscreen) { $states += "offscreen" }
-
-    # Probe patterns only when the element supports them: the pattern list is
-    # fetched once per node and shared with the traversal.
-    if ($Patterns -contains "value") {
-        try {
-            $valuePattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-            if ($valuePattern -and $valuePattern.Current.IsReadOnly) {
-                $states += "readonly"
-            } else {
-                $states += "editable"
-            }
-        } catch {}
-    }
-
-    if ($Patterns -contains "text") {
-        try {
-            $textPattern = $Element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-            if ($textPattern) { $states += "multiline" }
-        } catch {}
-    }
-
-    return $states
-}
-
-function Get-SupportedPatterns {
-    param([System.Windows.Automation.AutomationElement]$Element)
-
-    $patterns = @()
-    $supportedPatterns = $Element.GetSupportedPatterns()
-
-    foreach ($pattern in $supportedPatterns) {
-        $name = $pattern.ProgrammaticName -replace "PatternIdentifiers.Pattern$", ""
-        $patterns += $name.ToLower()
-    }
-
-    return $patterns
-}
-
-function Test-IsInteractive {
-    param(
-        [System.Windows.Automation.AutomationElement]$Element,
-        [string[]]$Patterns = $null
-    )
-
-    # Check if keyboard focusable
-    if ($Element.Current.IsKeyboardFocusable) { return $true }
-
-    # Check for interactive patterns
-    if ($null -eq $Patterns) { $Patterns = @(Get-SupportedPatterns $Element) }
-
-    foreach ($p in $Patterns) {
-        if ($script:InteractivePatterns -contains $p) { return $true }
-    }
-
-    return $false
-}
 
 function Test-IsEmptyStructural {
     param($Node)
@@ -133,189 +36,137 @@ function Test-IsEmptyStructural {
     return $isStructural -and -not $hasName -and -not $hasValue -and -not $hasChildren
 }
 
-function Get-AccessibilityTree {
+# Render a walker node into the snapshot shape the CLI expects. Refs record the
+# node identity and a point inside it; the live element is looked up on demand.
+function ConvertTo-ComSnapshotNode {
     param(
-        [System.Windows.Automation.AutomationElement]$Element,
-        [int]$MaxDepth = 10,
-        [int]$CurrentDepth = 0,
+        [UiaNode]$Node,
+        [int[]]$Path,
         [ref]$RefCounter,
         [bool]$InteractiveOnly = $false,
-        [bool]$Compact = $false
+        [bool]$Compact = $false,
+        [int]$Depth = 0,
+        [int]$MaxDepth = 10
     )
 
-    if ($CurrentDepth -gt $MaxDepth) {
+    if ($Depth -gt $MaxDepth) {
         $script:WasTruncated = $true
         return $null
     }
-
-    $script:SnapshotNodes++
-    if ($script:SnapshotNodes -gt $script:MaxSnapshotNodes) {
-        $script:WasTruncated = $true
-        return $null
-    }
-
-    if ($null -ne $script:SnapshotStart -and
-        ((Get-Date) - $script:SnapshotStart).TotalSeconds -gt $script:MaxSnapshotSeconds) {
-        $script:WasTruncated = $true
-        return $null
-    }
-
-    # Heartbeat every 64 nodes so the daemon can tell a long traversal from a
-    # dead agent (the response only arrives at the very end).
-    # dead agent (the response only arrives at the very end). The node modulo
-    # keeps the check cheap and the timestamp bounds the rate to ~1/s.
-    if (($script:SnapshotNodes % 64) -eq 0 -and
-        ((Get-Date) - $script:LastProgressAt).TotalMilliseconds -gt 1000) {
-        $script:LastProgressAt = Get-Date
-        Send-DvcProgress -Handle $script:DvcHandle -Id $script:CurrentRequestId -Phase "snapshot" `
-            -ElapsedMs ([int]((Get-Date) - $script:SnapshotStart).TotalMilliseconds) -Nodes $script:SnapshotNodes
-    }
-
-    # For interactive filter, check if this element or any descendant is interactive
-    # One pattern query per node drives the interactive filter, the state probes
-    # and the reported pattern list (it used to be queried twice per node).
-    $patterns = @(Get-SupportedPatterns $Element)
-
-    # For interactive filter, check if this element or any descendant is interactive
-    $isInteractive = Test-IsInteractive $Element $patterns
 
     $RefCounter.Value++
     $ref = $RefCounter.Value
-    $script:RefMap[$ref] = $Element
 
-    $rect = $Element.Current.BoundingRectangle
-    $node = [ordered]@{}
+    # NB: not $node - PowerShell variable names are case-insensitive and the
+    # parameter above is already $Node.
+    $rendered = [ordered]@{}
+    $rendered["ref"] = $ref
 
-    # Always include ref (with "e" prefix handled in output)
-    $node["ref"] = $ref
-
-    $node["role"] = $Element.Current.ControlType.ProgrammaticName -replace "ControlType\.", ""
-
-    if (-not [string]::IsNullOrEmpty($Element.Current.Name)) {
-        $node["name"] = $Element.Current.Name
+    $script:RefMap[$ref] = @{
+        Role = $Node.Role
+        Name = $Node.Name
+        AutomationId = $Node.AutomationId
     }
 
-    if (-not [string]::IsNullOrEmpty($Element.Current.AutomationId)) {
-        $node["automation_id"] = $Element.Current.AutomationId
-    }
+    if (-not [string]::IsNullOrEmpty($Node.Role)) { $rendered["role"] = $Node.Role }
+    if (-not [string]::IsNullOrEmpty($Node.Name)) { $rendered["name"] = $Node.Name }
+    if (-not [string]::IsNullOrEmpty($Node.AutomationId)) { $rendered["automation_id"] = $Node.AutomationId }
+    if (-not [string]::IsNullOrEmpty($Node.ClassName)) { $rendered["class_name"] = $Node.ClassName }
 
-    if (-not [string]::IsNullOrEmpty($Element.Current.ClassName)) {
-        $node["class_name"] = $Element.Current.ClassName
-    }
+    $bounds = Get-UiaNodeBounds $Node
+    if ($null -ne $bounds) { $rendered["bounds"] = $bounds }
 
-    if (Test-FiniteRect $rect) {
-        $node["bounds"] = @{
-            x = ConvertTo-SafeInt32 $rect.X
-            y = ConvertTo-SafeInt32 $rect.Y
-            width = ConvertTo-SafeInt32 $rect.Width
-            height = ConvertTo-SafeInt32 $rect.Height
-        }
-    }
+    $states = @(Get-UiaNodeStates $Node)
+    if ($states.Count -gt 0) { $rendered["states"] = $states }
 
-    $states = @(Get-ElementStates $Element $patterns)
-    if ($states.Count -gt 0) {
-        $node["states"] = $states
-    }
+    if ($Node.HasValue -and $null -ne $Node.Value) { $rendered["value"] = $Node.Value }
+    if ($null -ne $Node.Patterns -and $Node.Patterns.Count -gt 0) { $rendered["patterns"] = @($Node.Patterns) }
 
-    # Read the value only for elements that expose a value pattern
-    if ($patterns -contains "value") {
-        try {
-            $valuePattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-            if ($valuePattern) {
-                $node["value"] = $valuePattern.Current.Value
-            }
-        } catch {}
-    }
-
-    if ($patterns.Count -gt 0) {
-        $node["patterns"] = $patterns
-    }
-
-    # Recurse into children: a single FindAll replaces the RawViewWalker loop,
-    # which cost two cross-process calls per child for the same raw view.
     $children = @()
-    try {
-        $childElements = $Element.FindAll(
-            [System.Windows.Automation.TreeScope]::Children,
-            [System.Windows.Automation.Condition]::TrueCondition)
+    foreach ($child in $Node.Children) {
+        $childNode = ConvertTo-ComSnapshotNode -Node $child -Path ($Path + $child.ChildIndex) -RefCounter $RefCounter `
+            -InteractiveOnly $InteractiveOnly -Compact $Compact -Depth ($Depth + 1) -MaxDepth $MaxDepth
+        if ($childNode) { $children += $childNode }
+    }
+    $rendered["children"] = @($children)
 
-        foreach ($child in $childElements) {
-            $childNode = Get-AccessibilityTree -Element $child -MaxDepth $MaxDepth `
-                -CurrentDepth ($CurrentDepth + 1) -RefCounter $RefCounter `
-                -InteractiveOnly $InteractiveOnly -Compact $Compact
-            if ($childNode) {
-                $children += $childNode
-            }
-        }
-    } catch {}
-
-    $node["children"] = @($children)
-
-    # Apply interactive filter: skip non-interactive elements with no interactive children
     if ($InteractiveOnly) {
-        $hasInteractiveChildren = $children.Count -gt 0
-        if (-not $isInteractive -and -not $hasInteractiveChildren) {
-            return $null
+        $isInteractive = $Node.Focusable
+        if (-not $isInteractive -and $null -ne $Node.Patterns) {
+            foreach ($p in $Node.Patterns) { if ($script:InteractivePatterns -contains $p) { $isInteractive = $true; break } }
         }
+        if (-not $isInteractive -and $children.Count -eq 0) { return $null }
     }
 
-    # Apply compact filter: remove empty structural elements
-    if ($Compact -and (Test-IsEmptyStructural $node)) {
-        return $null
-    }
+    if ($Compact -and (Test-IsEmptyStructural $rendered)) { return $null }
 
-    return $node
+    return $rendered
 }
 
 function Invoke-Snapshot {
     param($Params)
-
-    # Resolve the scope selector before the ref map is replaced, so that a
-    # snapshot can be scoped to a @ref taken from the previous snapshot.
-    $scopeRoot = $null
-    if ($Params.selector) {
-        $scopeRoot = Find-Element -Selector $Params.selector
-        if (-not $scopeRoot) {
-            throw "Could not find element for snapshot: $($Params.selector)"
-        }
-    }
-
-    $script:RefMap = @{}
-    $script:WasTruncated = $false
-    $script:SnapshotNodes = 0
-    $script:SnapshotStart = Get-Date
-    $script:LastProgressAt = Get-Date
-    $refCounter = [ref]0
-    $script:SnapshotId = [guid]::NewGuid().ToString().Substring(0, 8)
 
     $maxDepth = if ($null -ne $Params.max_depth) { [int]$Params.max_depth } else { 10 }
     $interactiveOnly = if ($null -ne $Params.interactive_only) { $Params.interactive_only } else { $false }
     $compact = if ($null -ne $Params.compact) { $Params.compact } else { $false }
     $focused = if ($null -ne $Params.focused) { $Params.focused } else { $false }
 
-    # Determine root element(s)
-    if ($scopeRoot) {
-        $tree = Get-AccessibilityTree -Element $scopeRoot -MaxDepth $maxDepth `
-            -RefCounter $refCounter -InteractiveOnly $interactiveOnly -Compact $compact
-    } elseif ($focused) {
-        # Start from focused element
-        $root = [System.Windows.Automation.AutomationElement]::FocusedElement
-        if (-not $root) {
-            throw "No focused element found"
+    # One cached COM walk of the desktop; everything below is served from it.
+    $comSnapshot = Get-UiaComSnapshot -MaxDepth 40 -MaxNodes $script:MaxSnapshotNodes -MaxSeconds $script:MaxSnapshotSeconds
+
+    $renderNode = $null
+    $renderPath = @()
+
+    if ($Params.selector) {
+        # A @ref scope points into the previous snapshot, so it is resolved
+        # before this snapshot replaces the ref map below.
+        $match = Find-UiaNode -Selector $Params.selector -Root $comSnapshot.Root
+        if ($null -ne $match) {
+            $renderNode = $match["Node"]
+            $renderPath = $match["Path"]
         }
-        $tree = Get-AccessibilityTree -Element $root -MaxDepth $maxDepth `
-            -RefCounter $refCounter -InteractiveOnly $interactiveOnly -Compact $compact
+    } elseif ($focused) {
+        $match = Find-UiaNodeInModel -Node $comSnapshot.Root -Path @() -Match { param($n) return $n.Focused }
+        if ($null -ne $match) {
+            $renderNode = $match["Node"]
+            $renderPath = $match["Path"]
+        }
     } else {
-        # Use RootElement (desktop) and walk with RawViewWalker
-        $root = [System.Windows.Automation.AutomationElement]::RootElement
-        $tree = Get-AccessibilityTree -Element $root -MaxDepth $maxDepth `
-            -RefCounter $refCounter -InteractiveOnly $interactiveOnly -Compact $compact
+        $renderNode = $comSnapshot.Root
+    }
+
+    if ($null -eq $renderNode) {
+        throw "Could not locate the snapshot scope in the accessibility tree: $($Params.selector)"
+    }
+
+    # From here on, @ref selectors point at this snapshot.
+    $script:RefMap = @{}
+    $script:WasTruncated = $false
+    $script:LastProgressAt = Get-Date
+    $refCounter = [ref]0
+    $script:SnapshotId = [guid]::NewGuid().ToString().Substring(0, 8)
+
+    $tree = ConvertTo-ComSnapshotNode -Node $renderNode -Path $renderPath -RefCounter $refCounter `
+        -InteractiveOnly $interactiveOnly -Compact $compact -MaxDepth $maxDepth
+
+    $truncatedReason = $null
+
+    if ($comSnapshot.Truncated) {
+        $script:WasTruncated = $true
+        if ($comSnapshot.NodeCount -ge $script:MaxSnapshotNodes) {
+            $truncatedReason = "node budget (" + $script:MaxSnapshotNodes + " nodes) reached"
+        } else {
+            $truncatedReason = "time budget (" + $script:MaxSnapshotSeconds + " s) reached"
+        }
+    } elseif ($script:WasTruncated) {
+        $truncatedReason = "depth limit (" + $maxDepth + ") reached"
     }
 
     return @{
         snapshot_id = $script:SnapshotId
         ref_count = $refCounter.Value
         truncated = $script:WasTruncated
+        truncated_reason = $truncatedReason
         max_depth = $maxDepth
         root = $tree
     }
