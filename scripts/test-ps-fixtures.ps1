@@ -181,6 +181,39 @@ if (-not (Test-Path $FixturesDir)) {
     exit 1
 }
 
+# Records of a redirected child stream arrive as a CLIXML <Objs> document when
+# the agent runs commands through powershell.exe -EncodedCommand; the conversion
+# that turns them back into text is exercised here with captured samples so the
+# format knowledge is pinned by tests rather than living only in the agent.
+function Test-ClixmlConversion {
+    Write-Host "`nTesting run output conversion..." -ForegroundColor Cyan
+
+    $libFile = Join-Path $PSScriptRoot ".." "crates" "agent-rdp-daemon" "src" "automation" "scripts" "lib" "actions.ps1"
+    if (-not (Test-Path $libFile)) {
+        Write-Host "  [SKIP] $libFile not found" -ForegroundColor Yellow
+        return
+    }
+
+    . $libFile
+    $newLine = [Environment]::NewLine
+
+    $errorClixml = @"
+#< CLIXML
+<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">boom_x000D__x000A_</S><S S="Warning">careful</S></Objs>
+"@
+    $converted = ConvertFrom-ClixmlOutput -Text $errorClixml
+    Write-TestResult -Name "clixml records become plain lines" -Passed ($converted -eq ("boom" + $newLine + "careful")) -Message "got: $converted"
+
+    $prefixed = "hello" + $newLine + "#< CLIXML" + $newLine + '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">boom</S></Objs>'
+    Write-TestResult -Name "text before the clixml blob is kept" -Passed ((ConvertFrom-ClixmlOutput -Text $prefixed) -eq ("hello" + $newLine + "boom")) -Message "got: $(ConvertFrom-ClixmlOutput -Text $prefixed)"
+
+    $progress = '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><Obj S="progress" RefId="0"><TN RefId="0"><T>System.Object</T></TN><MS><PR N="Record"><AV>Preparing modules</AV><AI>0</AI></PR></MS></Obj><S S="Error">real error</S></Objs>'
+    Write-TestResult -Name "progress records are dropped, errors kept" -Passed ((ConvertFrom-ClixmlOutput -Text ("#< CLIXML" + $newLine + $progress)) -eq "real error") -Message "got: $(ConvertFrom-ClixmlOutput -Text ("#< CLIXML" + $newLine + $progress))"
+
+    Write-TestResult -Name "plain text is returned unchanged" -Passed ((ConvertFrom-ClixmlOutput -Text "just text") -eq "just text")
+    Write-TestResult -Name "unparseable clixml is returned unchanged" -Passed ((ConvertFrom-ClixmlOutput -Text ("#< CLIXML" + $newLine + "<Objs><S>truncated")) -eq ("#< CLIXML" + $newLine + "<Objs><S>truncated"))
+}
+
 # Test automation request fixtures
 $automationDir = Join-Path $FixturesDir "automation"
 if (Test-Path $automationDir) {
@@ -195,6 +228,9 @@ if (Test-Path $responsesDir) {
 
 # Test command coverage
 Test-CommandCoverage
+
+# Test run-output conversion (CLIXML records -> text)
+Test-ClixmlConversion
 
 # Summary
 Write-Host "`n=============================" -ForegroundColor White

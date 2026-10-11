@@ -300,6 +300,56 @@ function Invoke-WaitFor {
     }
 }
 
+# PowerShell serialises the records of redirected streams as CLIXML when a child
+# runs with -EncodedCommand and no console: progress records and errors arrive as
+# an <Objs> document instead of text. Turn those records back into plain lines
+# (progress records carry no <S> node and are dropped) so run output stays
+# readable; text that is not CLIXML is returned unchanged.
+function ConvertFrom-ClixmlOutput {
+    param([string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text) -or $Text.IndexOf('#< CLIXML') -lt 0) { return $Text }
+
+    $start = $Text.IndexOf('<Objs')
+    if ($start -lt 0) { return $Text }
+
+    # The document is parsed by System.Xml.XmlDocument (the [xml] cast) and
+    # queried with XPath; only bounding it inside the surrounding stream text,
+    # choosing which records carry text, and decoding CLIXML's own _xHHHH_
+    # escapes (not XML escapes) are manual. No DOCTYPE can appear because the
+    # parse starts at the <Objs> element, so no entity resolution can be triggered.
+    try { $document = [xml]$Text.Substring($start) } catch { return $Text }
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    $prefix = $Text.Substring(0, $start).Replace('#< CLIXML', '').Trim()
+    if (-not [string]::IsNullOrEmpty($prefix)) { $lines.Add($prefix) }
+
+    foreach ($node in $document.Objs.ChildNodes) {
+        # Errors and warnings arrive as top-level <S> records. Wrapped records
+        # keep their text in an <S> child; a record without one (progress, for
+        # example) has no text form and is dropped.
+        if ($node.Name -eq 'S') {
+            $text = $node.InnerText
+        } elseif ($node.Name -eq 'Obj') {
+            $textNode = $node.SelectSingleNode('S')
+            if ($null -eq $textNode) { continue }
+            $text = $textNode.InnerText
+        } else {
+            $text = $node.InnerText
+        }
+
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+
+        $line = [regex]::Replace($text, '_x([0-9A-Fa-f]{4})_', {
+            param($match)
+            return [string][char][Convert]::ToInt32($match.Groups[1].Value, 16)
+        })
+        $lines.Add($line.TrimEnd())
+    }
+
+    return ($lines -join [Environment]::NewLine)
+}
+
 function Invoke-Run {
     param($Params)
 
@@ -318,8 +368,13 @@ function Invoke-Run {
     if (-not [string]::IsNullOrEmpty($commandArgs)) {
         $fullCommand = "$command $commandArgs"
     }
-    $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($fullCommand))
-    $startInfo.Arguments = "-NoProfile -EncodedCommand $encodedCommand"
+
+    # -EncodedCommand makes the child serialise redirected stream records as
+    # CLIXML (progress records and errors); silence progress here and convert any
+    # remaining CLIXML back to text after the process exits (see ConvertFrom-ClixmlOutput).
+    $silentCommand = '$ProgressPreference = ''SilentlyContinue''; ' + $fullCommand
+    $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($silentCommand))
+    $startInfo.Arguments = "-NoProfile -OutputFormat Text -EncodedCommand $encodedCommand"
     $startInfo.WorkingDirectory = $env:USERPROFILE
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $wait
@@ -329,8 +384,8 @@ function Invoke-Run {
     $process = [System.Diagnostics.Process]::Start($startInfo)
 
     if ($wait) {
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
 
         # Wait in short slices so a long-running command can send heartbeats; the
         # overall budget behaves exactly as before.
@@ -359,8 +414,8 @@ function Invoke-Run {
 
         return @{
             exit_code = $process.ExitCode
-            stdout = $stdoutTask.Result
-            stderr = $stderrTask.Result
+            stdout = ConvertFrom-ClixmlOutput -Text $stdoutTask.Result
+            stderr = ConvertFrom-ClixmlOutput -Text $stderrTask.Result
         }
     } else {
         return @{
