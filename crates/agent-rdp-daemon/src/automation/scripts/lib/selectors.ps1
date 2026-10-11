@@ -106,6 +106,13 @@ function Find-Element {
         throw "Selector cannot be empty"
     }
 
+    # A bare prefix is always a malformed selector. Without this guard it fell
+    # through to a whole-desktop element search, which wedged the agent until it
+    # was relaunched (reproduced with a bare @).
+    if ($Selector -match '^[@#~.]$' -or $Selector -eq 'role:') {
+        throw "Malformed selector: $Selector"
+    }
+
     # @ref or @eN - reference from snapshot (supports both @123 and @e123 formats)
     if ($Selector -match '^@e?(\d+)$') {
         $ref = [int]$Matches[1]
