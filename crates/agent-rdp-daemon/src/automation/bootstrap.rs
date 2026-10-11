@@ -110,6 +110,10 @@ impl AutomationBootstrap {
         rdp.send_key_press("super+r").await?;
         sleep(Duration::from_millis(500)).await;
 
+        // Run dialog may contain the previously executed command.
+        rdp.send_key_press("ctrl+a").await?;
+        sleep(Duration::from_millis(100)).await;
+
         // Type the PowerShell command
         rdp.send_text(&ps_command).await?;
         sleep(Duration::from_millis(200)).await;
