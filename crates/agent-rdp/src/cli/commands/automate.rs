@@ -136,7 +136,16 @@ pub async fn run(
     };
 
     let request = Request::Automate(automate_request);
-    let response = client.send(&request, timeout_ms).await?;
+    // A wait_for request expires on the agent side. Keep the client deadline past
+    // that expiry so the agent's "timeout waiting for element" answer is what
+    // surfaces, instead of the client giving up first.
+    let request_timeout = match &request {
+        Request::Automate(AutomateRequest::WaitFor { timeout_ms: wait_ms, .. }) => {
+            std::cmp::max(timeout_ms, wait_ms.saturating_add(5000))
+        }
+        _ => timeout_ms,
+    };
+    let response = client.send(&request, request_timeout).await?;
     output.print_response(&response);
 
     if !response.success {
