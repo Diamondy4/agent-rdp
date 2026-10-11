@@ -17,15 +17,43 @@ use super::dvc_channel::{DvcError, DvcProtocolMessage, DvcSendCommand, SharedDvc
 /// Number of consecutive failures before suggesting reconnection.
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 3;
 
+/// Deadline for requests that are expected to answer quickly.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Snapshots walk the accessibility tree and may legitimately take longer than
+/// the default; the agent bounds its own traversal well below this.
+const SNAPSHOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Slack added on top of a request's own wait or process budget, so the daemon
+/// never abandons a request before the agent's own deadline expires.
+const RESPONSE_SLACK: Duration = Duration::from_secs(5);
+
+/// Deadline to wait for a response, derived from what the request is allowed to
+/// do on the agent side instead of from a single constant.
+fn request_timeout(request: &AutomateRequest) -> Duration {
+    match request {
+        AutomateRequest::Snapshot { .. } => SNAPSHOT_REQUEST_TIMEOUT,
+        AutomateRequest::WaitFor { timeout_ms, .. } => {
+            Duration::from_millis(*timeout_ms).saturating_add(RESPONSE_SLACK)
+        }
+        AutomateRequest::Run { wait, timeout_ms, .. } => {
+            if *wait {
+                Duration::from_millis(*timeout_ms).saturating_add(RESPONSE_SLACK)
+            } else {
+                DEFAULT_REQUEST_TIMEOUT
+            }
+        }
+        _ => DEFAULT_REQUEST_TIMEOUT,
+    }
+}
+
 /// DVC-based IPC client for communicating with the PowerShell agent.
 #[derive(Debug, Clone)]
 pub struct DvcIpc {
     /// Shared state with the DVC processor.
     state: SharedDvcState,
-    /// Timeout for waiting on responses.
+    /// Lower bound for the per-request response deadline.
     timeout: Duration,
-    /// Count of consecutive failures (for detecting dead channel).
-    consecutive_failures: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl DvcIpc {
@@ -33,33 +61,30 @@ impl DvcIpc {
     pub fn new(state: SharedDvcState) -> Self {
         Self {
             state,
-            timeout: Duration::from_secs(10),
-            consecutive_failures: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 
-    /// Set the timeout for responses.
+    /// Raise the lower bound for every request deadline.
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
     }
 
     /// Get the number of consecutive failures.
     pub fn consecutive_failures(&self) -> u32 {
-        self.consecutive_failures
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.state.lock().consecutive_failures
     }
 
     /// Reset the failure counter.
     fn reset_failures(&self) {
-        self.consecutive_failures
-            .store(0, std::sync::atomic::Ordering::Relaxed);
+        self.state.lock().consecutive_failures = 0;
     }
 
     /// Increment the failure counter and return the new count.
     fn increment_failures(&self) -> u32 {
-        self.consecutive_failures
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1
+        let mut state = self.state.lock();
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        state.consecutive_failures
     }
 
     /// Check if the DVC channel is ready (handshake received).
@@ -96,6 +121,7 @@ impl DvcIpc {
 
         // Convert AutomateRequest to command name and params
         let (command, params) = self.serialize_request(request)?;
+        let command_name = command.clone();
 
         debug!(
             "Sending DVC request {}: command={}",
@@ -145,7 +171,8 @@ impl DvcIpc {
         debug!("Sent DVC request on channel {}", channel_id);
 
         // Wait for response with timeout
-        let response = match timeout(self.timeout, rx).await {
+        let deadline = self.timeout.max(request_timeout(request));
+        let response = match timeout(deadline, rx).await {
             Ok(Ok(response)) => {
                 self.reset_failures();
                 response
@@ -188,7 +215,11 @@ impl DvcIpc {
                         failures
                     );
                 }
-                anyhow::bail!("Timeout waiting for DVC response");
+                anyhow::bail!(
+                    "Timeout waiting for DVC response after {:?} (command: {}). \
+                    The agent may be busy with a long request; retry or raise --timeout.",
+                    deadline, command_name
+                );
             }
         };
 
@@ -236,6 +267,41 @@ impl DvcIpc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_request_timeout_budgets() {
+        assert_eq!(request_timeout(&AutomateRequest::Status), DEFAULT_REQUEST_TIMEOUT);
+
+        let snapshot = AutomateRequest::Snapshot {
+            interactive_only: false,
+            compact: false,
+            max_depth: 10,
+            selector: None,
+            focused: false,
+        };
+        assert_eq!(request_timeout(&snapshot), SNAPSHOT_REQUEST_TIMEOUT);
+
+        let run_without_wait = AutomateRequest::Run {
+            command: "Write-Output hi".to_string(),
+            args: Vec::new(),
+            wait: false,
+            hidden: false,
+            timeout_ms: 10_000,
+        };
+        assert_eq!(request_timeout(&run_without_wait), DEFAULT_REQUEST_TIMEOUT);
+
+        let run_with_wait = AutomateRequest::Run {
+            command: "Write-Output hi".to_string(),
+            args: Vec::new(),
+            wait: true,
+            hidden: false,
+            timeout_ms: 5_000,
+        };
+        assert_eq!(
+            request_timeout(&run_with_wait),
+            Duration::from_millis(5_000).saturating_add(RESPONSE_SLACK)
+        );
+    }
     use crate::automation::dvc_channel::new_shared_dvc_state;
 
     #[test]

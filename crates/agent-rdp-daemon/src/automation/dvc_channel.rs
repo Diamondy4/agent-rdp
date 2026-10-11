@@ -89,6 +89,10 @@ pub struct DvcSharedState {
     pub channel_id: Option<u32>,
     /// Sender to send DVC data through the RDP session.
     pub command_tx: Option<DvcCommandSender>,
+    /// Consecutive DVC failures with no response in between. Any response -
+    /// including a late one for a request the IPC layer already gave up on -
+    /// proves the agent is alive and resets this.
+    pub consecutive_failures: u32,
 }
 
 impl Default for DvcSharedState {
@@ -98,6 +102,7 @@ impl Default for DvcSharedState {
             handshake: None,
             channel_id: None,
             command_tx: None,
+            consecutive_failures: 0,
         }
     }
 }
@@ -236,6 +241,9 @@ impl DvcProcessor for AutomationDvc {
                 // Route to pending request
                 let sender = {
                     let mut state = self.state.lock();
+                    // Any response shows the agent is alive, even when it
+                    // arrives for a request that already timed out.
+                    state.consecutive_failures = 0;
                     state.pending.remove(&id)
                 };
 
