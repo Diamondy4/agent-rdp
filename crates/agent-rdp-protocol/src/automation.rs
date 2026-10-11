@@ -240,6 +240,9 @@ pub struct AccessibilitySnapshot {
     /// Maximum depth used for this snapshot.
     #[serde(default)]
     pub max_depth: u32,
+    /// Why the snapshot was cut short (depth, node budget or time budget).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub truncated_reason: Option<String>,
     /// Root element of the tree.
     pub root: AccessibilityElement,
 }

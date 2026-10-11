@@ -22,6 +22,10 @@ truncated: boolean,
  */
 max_depth: number, 
 /**
+ * Why the snapshot was cut short (depth, node budget or time budget).
+ */
+truncated_reason: string | null, 
+/**
  * Root element of the tree.
  */
 root: AccessibilityElement, };

@@ -94,10 +94,16 @@ impl Output {
                 println!("Snapshot ID: {}", snapshot.snapshot_id);
                 println!("Elements: {}", snapshot.ref_count);
                 if snapshot.truncated {
-                    println!(
-                        "[Truncated at depth {} - use -d to increase or -s to scope to a window]",
-                        snapshot.max_depth
-                    );
+                    match &snapshot.truncated_reason {
+                        Some(reason) => println!(
+                            "[Truncated - {}. The snapshot is partial; use -d, -i or -s to narrow it]",
+                            reason
+                        ),
+                        None => println!(
+                            "[Truncated at depth {} - use -d to increase or -s to scope to a window]",
+                            snapshot.max_depth
+                        ),
+                    }
                 }
                 println!();
                 self.print_element_tree(&snapshot.root, 0);
