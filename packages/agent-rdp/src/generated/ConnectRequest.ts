@@ -42,6 +42,29 @@ drives: Array<DriveMapping>,
  */
 enable_win_automation: boolean, 
 /**
+ * Provision (stage) the bundled automation helper files for the remote
+ * session and map the RDPDR drive that carries them (default: true).
+ *
+ * Set to false when the helper is already installed on the remote machine
+ * (see automation_agent_dir).
+ */
+automation_provision?: boolean, 
+/**
+ * Launch the automation helper automatically once connected (default: true).
+ *
+ * When false, the DVC channel is still registered for the session, so a
+ * helper started manually later becomes usable without reconnecting.
+ */
+automation_launch?: boolean, 
+/**
+ * Windows-side directory containing the automation helper, e.g.
+ * %LOCALAPPDATA%\agent-rdp (expected layout: <dir>\scripts\agent.ps1).
+ *
+ * When set, the helper is launched from this directory instead of the
+ * RDPDR-mapped \\TSCLIENT\<drive> path.
+ */
+automation_agent_dir?: string, 
+/**
  * WebSocket streaming port (0 = disabled).
  */
 stream_port: number, 

@@ -94,6 +94,34 @@ pub struct ConnectRequest {
     #[serde(default)]
     pub enable_win_automation: bool,
 
+    /// Provision (stage) the bundled automation helper files for the remote
+    /// session and map the RDPDR drive that carries them (default: true).
+    ///
+    /// Set to false when the helper is already installed on the remote machine
+    /// (see automation_agent_dir).
+    #[serde(default = "default_true")]
+    #[ts(as = "Option<bool>")]
+    #[ts(optional)]
+    pub automation_provision: bool,
+
+    /// Launch the automation helper automatically once connected (default: true).
+    ///
+    /// When false, the DVC channel is still registered for the session, so a
+    /// helper started manually later becomes usable without reconnecting.
+    #[serde(default = "default_true")]
+    #[ts(as = "Option<bool>")]
+    #[ts(optional)]
+    pub automation_launch: bool,
+
+    /// Windows-side directory containing the automation helper, e.g.
+    /// %LOCALAPPDATA%\agent-rdp (expected layout: <dir>\scripts\agent.ps1).
+    ///
+    /// When set, the helper is launched from this directory instead of the
+    /// RDPDR-mapped \\TSCLIENT\<drive> path.
+    #[serde(default)]
+    #[ts(optional)]
+    pub automation_agent_dir: Option<String>,
+
     /// WebSocket streaming port (0 = disabled).
     #[serde(default)]
     pub stream_port: u16,
@@ -132,6 +160,9 @@ impl Default for ConnectRequest {
             height: 800,
             drives: Vec::new(),
             enable_win_automation: false,
+            automation_provision: true,
+            automation_launch: true,
+            automation_agent_dir: None,
             stream_port: 0,
             stream_fps: default_stream_fps(),
             stream_quality: default_stream_quality(),

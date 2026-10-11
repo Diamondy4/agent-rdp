@@ -169,6 +169,31 @@ When `--enable-win-automation` is specified:
 
 **Note**: RDPDR drive mapping is still used for bootstrapping (launching the agent), but all subsequent IPC uses DVC.
 
+### Manual provisioning and launching
+
+Helper staging, the RDPDR drive mapping, and launching the helper are independent concerns, so a
+machine with a pre-installed helper can be used without transferring anything:
+
+- `--no-automation-provision` skips staging the helper files and the RDPDR drive mapping.
+- `--automation-agent-dir <WINDOWS_PATH>` names the Windows-side directory holding the helper
+  (expected layout: `<dir>\scripts\agent.ps1` plus `<dir>\scripts\lib\*`, e.g.
+  `%LOCALAPPDATA%\agent-rdp`). The helper is launched from there instead of the TSCLIENT drive.
+- `--no-automation-launch` skips sending the launch command so `agent.ps1` can be started
+  manually on the remote host.
+
+When `--automation-agent-dir` is given, automatic launching always uses that directory, even if
+the helper was also staged (the staged copy then serves as a manual fallback).
+
+All three options require `--enable-win-automation`. The DVC channel (`AgentRdp::Automation`)
+is registered either way, so a manually started helper becomes usable without reconnecting.
+
+Supported combinations: the default (stage and launch from the mapped TSCLIENT drive);
+`--no-automation-provision --automation-agent-dir`; `--automation-agent-dir --no-automation-launch`;
+and `--no-automation-provision --no-automation-launch` (fully manual). Rejected:
+`--no-automation-provision` without `--automation-agent-dir` unless `--no-automation-launch`
+is also given. The CLI rejects that combination, and the daemon skips launching rather than
+typing a command that cannot work.
+
 ## PowerShell Agent
 
 The agent script is embedded in the Rust binary via `include_str!()` and written to disk at runtime.

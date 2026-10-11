@@ -21,6 +21,9 @@ pub async fn handle(
     clipboard_changed_rx: &ClipboardChangedRx,
 ) -> Response {
     let enable_automation = params.enable_win_automation;
+    let automation_provision = params.automation_provision;
+    let automation_launch = params.automation_launch;
+    let automation_agent_dir = params.automation_agent_dir.clone();
     let stream_port = params.stream_port;
     let stream_fps = params.stream_fps;
     let stream_quality = params.stream_quality;
@@ -59,12 +62,27 @@ pub async fn handle(
         // Initialize automation directory structure first
         {
             let mut auto_state = automation_state.lock().await;
-            if let Err(e) = bootstrap.initialize(&mut auto_state).await {
-                warn!("Failed to initialize automation directory: {}", e);
-                // Don't add the drive if we can't create the directory
+            if automation_provision {
+                if let Err(e) = bootstrap.initialize(&mut auto_state).await {
+                    warn!("Failed to initialize automation directory: {}", e);
+                    // Don't add the drive if we can't create the directory
+                } else {
+                    // Only add drive if directory was created successfully
+                    drives.push(bootstrap.get_drive_mapping(&auto_state));
+                }
             } else {
-                // Only add drive if directory was created successfully
-                drives.push(bootstrap.get_drive_mapping(&auto_state));
+                match automation_agent_dir.as_deref() {
+                    Some(dir) => info!(
+                        "Automation provisioning skipped; expecting pre-provisioned helper at {}",
+                        dir
+                    ),
+                    None => info!(
+                        "Automation provisioning skipped; helper is started manually on the remote host"
+                    ),
+                }
+                // No drive mapping: a pre-provisioned helper must not be
+                // transferred or mapped.
+                bootstrap.init_dvc(&mut auto_state);
             }
         }
     }
@@ -158,8 +176,12 @@ pub async fn handle(
         }
     }
 
-    // Bootstrap automation if enabled (directory was already created before connection)
-    if enable_automation {
+    // Bootstrap automation if enabled. A helper can only be launched if it was
+    // either staged for this session (RDPDR drive) or already lives in a known
+    // directory on the remote machine.
+    let helper_available = automation_provision || automation_agent_dir.is_some();
+
+    if enable_automation && automation_launch && helper_available {
         info!("Bootstrapping Windows UI Automation...");
 
         let session_dir = crate::get_session_dir("");
@@ -170,7 +192,10 @@ pub async fn handle(
             let session = rdp_session.lock().await;
             if let Some(ref rdp) = *session {
                 let auto_state = automation_state.lock().await;
-                if let Err(e) = bootstrap.launch_agent(rdp, &auto_state).await {
+                if let Err(e) = bootstrap
+                    .launch_agent(rdp, &auto_state, automation_agent_dir.as_deref())
+                    .await
+                {
                     warn!("Failed to launch automation agent: {}", e);
                 }
             }
@@ -184,6 +209,10 @@ pub async fn handle(
                 // Don't fail - automation just won't be available
             }
         }
+    } else if enable_automation && automation_launch {
+        warn!("Automation launch skipped: no staged helper and no automation agent directory");
+    } else if enable_automation {
+        info!("Automation helper launch skipped; start agent.ps1 manually on the remote host");
     }
 
     Response::success(ResponseData::Connected {

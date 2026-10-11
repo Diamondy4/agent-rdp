@@ -124,6 +124,48 @@ pub struct ConnectArgs {
     /// Enable Windows UI Automation (requires automation agent on remote host)
     #[arg(long)]
     pub enable_win_automation: bool,
+
+    /// Do not stage the bundled automation helper files to the remote session;
+    /// assume they are already installed there (see --automation-agent-dir)
+    #[arg(long, requires = "enable_win_automation")]
+    pub no_automation_provision: bool,
+
+    /// Windows-side directory that holds the automation helper
+    /// (expected layout: <dir>\scripts\agent.ps1, e.g. %LOCALAPPDATA%\agent-rdp).
+    /// When set, the helper is launched from there instead of the RDPDR-mapped TSCLIENT drive
+    #[arg(long, value_name = "WINDOWS_PATH", requires = "enable_win_automation")]
+    pub automation_agent_dir: Option<String>,
+
+    /// Do not launch the automation helper automatically. The DVC channel is
+    /// still registered, so a helper started manually later becomes usable
+    /// without reconnecting
+    #[arg(long, requires = "enable_win_automation")]
+    pub no_automation_launch: bool,
+}
+
+impl ConnectArgs {
+    /// Validate option combinations that clap's declarative rules do not cover.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.no_automation_launch
+            && self.no_automation_provision
+            && self.automation_agent_dir.is_none()
+        {
+            anyhow::bail!(
+                "--no-automation-provision requires --automation-agent-dir <WINDOWS_PATH> \
+                 (the directory to launch the helper from) unless --no-automation-launch is given"
+            );
+        }
+
+        if let Some(dir) = self.automation_agent_dir.as_deref() {
+            // A path that is empty after trimming whitespace and backslashes
+            // would produce a malformed launch command.
+            if dir.trim().trim_matches('\\').is_empty() {
+                anyhow::bail!("--automation-agent-dir must not be empty");
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Screenshot command arguments.
@@ -511,4 +553,125 @@ pub struct LocateArgs {
     /// Return all text lines on screen (ignores search text)
     #[arg(long, short = 'a')]
     pub all: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Parse a connect invocation from base args plus extra flags.
+    fn connect_args(extra: &[&str]) -> Result<Cli, clap::Error> {
+        let mut args = vec![
+            "agent-rdp",
+            "connect",
+            "--host",
+            "h",
+            "--username",
+            "u",
+            "--password",
+            "p",
+        ];
+        args.extend_from_slice(extra);
+        Cli::try_parse_from(args)
+    }
+
+    /// Extract ConnectArgs from a parsed Cli.
+    fn connect_params(cli: Cli) -> ConnectArgs {
+        match cli.command {
+            Commands::Connect(args) => args,
+            _ => panic!("expected connect command"),
+        }
+    }
+
+    #[test]
+    fn automation_options_default_to_provision_and_launch() {
+        let args = connect_params(connect_args(&["--enable-win-automation"]).unwrap());
+
+        assert!(!args.no_automation_provision);
+        assert!(!args.no_automation_launch);
+        assert!(args.automation_agent_dir.is_none());
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn no_provision_with_agent_dir_parses() {
+        let cli = connect_args(&[
+            "--enable-win-automation",
+            "--no-automation-provision",
+            "--automation-agent-dir",
+            r"C:\Users\foo\AppData\Local\agent-rdp",
+        ])
+        .unwrap();
+        let args = connect_params(cli);
+
+        assert!(args.no_automation_provision);
+        assert_eq!(
+            args.automation_agent_dir.as_deref(),
+            Some(r"C:\Users\foo\AppData\Local\agent-rdp")
+        );
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn agent_dir_with_no_launch_keeps_provisioning_enabled() {
+        let cli = connect_args(&[
+            "--enable-win-automation",
+            "--automation-agent-dir",
+            r"C:\agent-rdp",
+            "--no-automation-launch",
+        ])
+        .unwrap();
+        let args = connect_params(cli);
+
+        assert!(!args.no_automation_provision);
+        assert!(args.no_automation_launch);
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn fully_manual_mode_parses_without_agent_dir() {
+        let cli = connect_args(&[
+            "--enable-win-automation",
+            "--no-automation-provision",
+            "--no-automation-launch",
+        ])
+        .unwrap();
+        let args = connect_params(cli);
+
+        assert!(args.no_automation_provision);
+        assert!(args.no_automation_launch);
+        assert!(args.automation_agent_dir.is_none());
+        assert!(args.validate().is_ok());
+    }
+
+    #[test]
+    fn automation_flags_require_enable_win_automation() {
+        assert!(connect_args(&["--no-automation-provision"]).is_err());
+        assert!(connect_args(&["--no-automation-launch"]).is_err());
+        assert!(connect_args(&["--automation-agent-dir", r"C:\agent-rdp"]).is_err());
+    }
+
+    #[test]
+    fn no_provision_without_agent_dir_is_rejected_by_validate() {
+        let args = connect_params(
+            connect_args(&["--enable-win-automation", "--no-automation-provision"]).unwrap(),
+        );
+
+        assert!(args.automation_agent_dir.is_none());
+        assert!(args.validate().is_err());
+    }
+
+    #[test]
+    fn empty_agent_dir_is_rejected_by_validate() {
+        let args = connect_params(
+            connect_args(&["--enable-win-automation", "--automation-agent-dir", "  "]).unwrap(),
+        );
+        assert!(args.validate().is_err());
+
+        let args = connect_params(
+            connect_args(&["--enable-win-automation", "--automation-agent-dir", r"\\"]).unwrap(),
+        );
+        assert!(args.validate().is_err());
+    }
 }

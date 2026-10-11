@@ -41,6 +41,23 @@ impl AutomationBootstrap {
     pub async fn initialize(&self, state: &mut AutomationState) -> anyhow::Result<()> {
         info!("Initializing automation for session");
 
+        self.provision(state).await?;
+        self.init_dvc(state);
+
+        info!(
+            "Automation initialized with ID {} at {:?}",
+            state.automation_id, state.automation_dir
+        );
+
+        Ok(())
+    }
+
+    /// Stage the bundled automation helper files for the remote session.
+    ///
+    /// Creates the directory structure (scripts/ and scripts/lib/) and writes
+    /// the embedded PowerShell script and libraries, which are mapped into the
+    /// remote session via RDPDR.
+    pub async fn provision(&self, state: &AutomationState) -> anyhow::Result<()> {
         // Create automation directory structure
         let automation_dir = &state.automation_dir;
         tokio::fs::create_dir_all(automation_dir).await?;
@@ -61,6 +78,15 @@ impl AutomationBootstrap {
         tokio::fs::write(lib_dir.join("dvc.ps1"), LIB_DVC).await?;
         debug!("Wrote automation library files to {:?}", lib_dir);
 
+        Ok(())
+    }
+
+    /// Register the DVC channel used by the automation helper.
+    ///
+    /// This is all a session needs for a helper to become usable whenever it
+    /// completes the DVC handshake, e.g. when agent.ps1 is started manually on
+    /// an already-provisioned machine. It does not touch the filesystem.
+    pub fn init_dvc(&self, state: &mut AutomationState) {
         // Initialize DVC state and IPC
         let dvc_state = new_shared_dvc_state();
         let dvc_ipc = DvcIpc::new(dvc_state.clone());
@@ -68,12 +94,10 @@ impl AutomationBootstrap {
         state.dvc_ipc = Some(dvc_ipc);
 
         state.enabled = true;
-        info!(
-            "Automation initialized with ID {} at {:?}",
-            state.automation_id, automation_dir
+        debug!(
+            "Automation DVC channel registered with ID {}",
+            state.automation_id
         );
-
-        Ok(())
     }
 
     /// Get the drive mapping for the automation directory.
@@ -84,11 +108,28 @@ impl AutomationBootstrap {
         }
     }
 
+    /// Build the PowerShell command that starts the helper on the remote machine.
+    ///
+    /// agent_dir is the Windows-side directory holding the helper (expected
+    /// layout: <dir>\scripts\agent.ps1). When None, the RDPDR-mapped
+    /// `\\TSCLIENT\<drive_name>` staging path is used.
+    fn launch_command(drive_name: &str, agent_dir: Option<&str>) -> String {
+        let base = match agent_dir {
+            Some(dir) => dir.trim_end_matches('\\').to_string(),
+            None => format!("\\\\TSCLIENT\\{}", drive_name),
+        };
+
+        format!(
+            "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{base}\\scripts\\agent.ps1\" -BasePath \"{base}\""
+        )
+    }
+
     /// Launch the automation agent on the remote Windows machine via Win+R.
     pub async fn launch_agent(
         &self,
         rdp: &RdpSession,
         state: &AutomationState,
+        agent_dir: Option<&str>,
     ) -> anyhow::Result<()> {
         info!("Launching automation agent on remote Windows machine");
 
@@ -97,12 +138,8 @@ impl AutomationBootstrap {
         sleep(Duration::from_secs(2)).await;
 
         // The command to run via Win+R
-        // Uses the mapped drive path: \\TSCLIENT\<drive_name>\scripts\agent.ps1
-        let ps_command = format!(
-            "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"\\\\TSCLIENT\\{}\\scripts\\agent.ps1\" -BasePath \"\\\\TSCLIENT\\{}\"",
-            state.drive_name,
-            state.drive_name
-        );
+        // Uses the mapped drive path unless an explicit agent directory is given
+        let ps_command = Self::launch_command(&state.drive_name, agent_dir);
 
         debug!("PowerShell command: {}", ps_command);
 
@@ -189,7 +226,7 @@ impl AutomationBootstrap {
         // Launch agent
         {
             let state = state.lock().await;
-            self.launch_agent(rdp, &state).await?;
+            self.launch_agent(rdp, &state, None).await?;
         }
 
         // Wait for handshake
@@ -269,5 +306,56 @@ mod tests {
 
         assert_eq!(mapping.name, "agent-automation");
         assert!(mapping.path.contains("automation-"));
+    }
+
+    #[tokio::test]
+    async fn test_init_dvc_registers_channel_without_staging_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let bootstrap = AutomationBootstrap::new(temp_dir.path().to_path_buf());
+        let mut state = AutomationState::new(temp_dir.path().to_path_buf());
+
+        bootstrap.init_dvc(&mut state);
+
+        assert!(state.enabled);
+        assert!(state.dvc_ipc.is_some());
+        assert!(state.dvc_state.is_some());
+        // Registering the DVC channel must not stage anything on disk
+        assert!(!state.automation_dir.exists());
+    }
+
+    #[test]
+    fn test_launch_command_uses_staged_tsclient_path() {
+        let command = AutomationBootstrap::launch_command("agent-automation", None);
+
+        assert_eq!(
+            command,
+            "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"\\\\TSCLIENT\\agent-automation\\scripts\\agent.ps1\" -BasePath \"\\\\TSCLIENT\\agent-automation\""
+        );
+    }
+
+    #[test]
+    fn test_launch_command_uses_agent_dir() {
+        let command = AutomationBootstrap::launch_command(
+            "agent-automation",
+            Some("C:\\Users\\foo\\AppData\\Local\\agent-rdp"),
+        );
+
+        assert_eq!(
+            command,
+            "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\Users\\foo\\AppData\\Local\\agent-rdp\\scripts\\agent.ps1\" -BasePath \"C:\\Users\\foo\\AppData\\Local\\agent-rdp\""
+        );
+    }
+
+    #[test]
+    fn test_launch_command_trims_trailing_backslash() {
+        let command = AutomationBootstrap::launch_command(
+            "agent-automation",
+            Some("C:\\Users\\foo\\AppData\\Local\\agent-rdp\\"),
+        );
+
+        assert_eq!(
+            command,
+            "powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"C:\\Users\\foo\\AppData\\Local\\agent-rdp\\scripts\\agent.ps1\" -BasePath \"C:\\Users\\foo\\AppData\\Local\\agent-rdp\""
+        );
     }
 }
