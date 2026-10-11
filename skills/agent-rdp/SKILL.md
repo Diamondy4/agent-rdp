@@ -35,7 +35,7 @@ agent-rdp automate snapshot -d 5         # Limit depth if too large
 
 ### Element not in accessibility tree at all
 
-Some UI elements (WebView content, certain dialogs, toast notifications) don't appear in the accessibility tree. Use OCR as a last resort:
+Some UI elements (custom-drawn surfaces, certain dialogs, toast notifications) don't appear in the accessibility tree. Chromium- and Electron-based windows do expose their content — query them with targeted selectors first (see "Web content" under Limitations). Use OCR as a last resort:
 
 1. Take screenshot to identify what you need: `agent-rdp screenshot -o screen.png`
 2. Use locate to find coordinates: `agent-rdp locate "Button Text"`
@@ -312,9 +312,11 @@ agent-rdp automate run "explorer.exe C:\\"                   # File Explorer
 
 **IMPORTANT: Read these limitations carefully before attempting automation tasks.**
 
-### UI Automation cannot access WebViews
-- The Windows Start menu search, Edge browser content, Electron app content, and other WebView-based UIs are NOT accessible via `automate snapshot`.
-- **Workaround**: Use `Win+R` (Run dialog) or `automate run` to launch programs directly instead of navigating through the Start menu.
+### Web content (Chromium / Electron) is accessible, but deep snapshots are expensive
+- Chromium-based browsers (Chrome, Edge, Yandex) and Electron apps (Zulip, Slack, VS Code) DO expose their content to UI Automation. Chromium turns renderer accessibility on when the first UI Automation client queries the window, so the very first query can be slow - retry once. `--force-renderer-accessibility` forces it on if detection fails.
+- Drive them with targeted selectors: DOM ids map to automation ids (`automate get '#compose-textarea'`, `automate fill '#inp' "text"`); exact element names work too.
+- Their trees are large (a real wiki page walked to ~1800 nodes), but the walk is bounded by node and time budgets and reports truncation, so a deep `snapshot` is safe - prefer scoping to the window or to a `#id` when you only need one element.
+- The Windows Start menu search is a separate case (it is not a normal WebView) - use `Win+R` (Run dialog) or `automate run` to launch programs directly.
 
 ### UI Automation cannot handle UAC dialogs
 - User Account Control elevation prompts run on a secure desktop isolated from UI Automation.

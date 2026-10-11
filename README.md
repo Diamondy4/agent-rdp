@@ -122,7 +122,7 @@ agent-rdp scroll right
 
 ### Locate (OCR)
 
-Find text on screen using OCR (powered by [ocrs](https://github.com/robertknight/ocrs)). Useful when UI Automation can't access certain elements (WebView content, some dialogs).
+Find text on screen using OCR (powered by [ocrs](https://github.com/robertknight/ocrs)). Useful when UI Automation can't access certain elements (custom-drawn surfaces, some dialogs, secure desktops).
 
 ```bash
 # Find lines containing text
@@ -428,7 +428,7 @@ The daemon is automatically started on the first command and persists until expl
 
 ### UI Automation
 
-- **WebViews**: UI Automation cannot interact with WebView content (e.g., Windows Start menu search, Edge browser content, Electron apps). Use `Win+R` or `automate run` to launch programs directly instead of clicking through menus.
+- **WebViews (Chromium / Electron)**: browser and Electron content *is* exposed to UI Automation — Chromium enables renderer accessibility on the first UI Automation query (force it with `--force-renderer-accessibility` if detection fails), so DOM ids show up as automation ids and elements can be read, filled and clicked. Prefer targeted selectors (`#AutomationId`, exact names, `automate get`) over deep whole-tree snapshots for these windows, because their trees are large and slow to walk. The Windows Start menu search remains a special case: use `Win+R` or `automate run` to launch programs directly instead of clicking through it.
 - **UAC Dialogs**: User Account Control elevation prompts run on a secure desktop and are not accessible via UI Automation. There is no good workaround - the remote user must interact with UAC manually, or UAC must be disabled (not recommended for security reasons).
 
 ### OCR Fallback
