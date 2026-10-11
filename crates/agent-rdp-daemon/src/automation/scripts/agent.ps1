@@ -25,6 +25,12 @@ $script:Version = "1.1.0"  # Version bump for DVC support
 # Local log path on Windows machine (RDPDR not used for logging anymore)
 $script:LocalLogPath = "$env:TEMP\agent-rdp-automation.log"
 $script:DvcHandle = [IntPtr]::Zero
+# Progress heartbeats: enabled per request by the daemon (see Send-DvcProgress)
+$script:ProgressEnabled = $false
+# Log heartbeat emissions even when they are not sent (diagnostics)
+$script:ProgressLogEnabled = $env:AGENT_RDP_PROGRESS_LOG -eq '1'
+# Id of the request currently being processed (used for heartbeats)
+$script:CurrentRequestId = $null
 
 # ============ LOGGING ============
 
@@ -110,6 +116,9 @@ function Start-Agent {
 
             Write-Log "Processing DVC request: id=$($request.id), command=$($request.command)"
 
+            $script:CurrentRequestId = $request.id
+            $script:ProgressEnabled = [bool]$request.progress
+
             $responseData = $null
             $responseError = $null
             $success = $true
@@ -148,6 +157,8 @@ function Start-Agent {
             try {
                 Send-DvcResponse -Handle $script:DvcHandle -Id $request.id -Success $success -Data $responseData -ErrorInfo $responseError
                 Write-Log "Response sent for request $($request.id)"
+                $script:CurrentRequestId = $null
+                $script:ProgressEnabled = $false
             } catch {
                 Write-Log "Failed to send response: $($_.Exception.Message)" "ERROR"
                 # If we can't send response, channel may be dead

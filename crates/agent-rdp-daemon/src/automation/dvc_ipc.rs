@@ -3,7 +3,6 @@
 //! Provides an async interface for sending requests to the PowerShell agent
 //! over the DVC channel and receiving responses.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use agent_rdp_protocol::AutomateRequest;
@@ -45,6 +44,17 @@ fn request_timeout(request: &AutomateRequest) -> Duration {
         }
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
+}
+
+/// Whether a request is long enough that the agent should send heartbeats for
+/// it. The agent only emits them when asked, so older daemons see no change.
+fn wants_progress(request: &AutomateRequest) -> bool {
+    matches!(
+        request,
+        AutomateRequest::Snapshot { .. }
+            | AutomateRequest::WaitFor { .. }
+            | AutomateRequest::Run { wait: true, .. }
+    )
 }
 
 /// DVC-based IPC client for communicating with the PowerShell agent.
@@ -133,6 +143,7 @@ impl DvcIpc {
             id: request_id.clone(),
             command,
             params,
+            progress: wants_progress(request),
         };
 
         // Encode the message
@@ -270,6 +281,25 @@ mod tests {
 
     #[test]
     fn test_request_timeout_budgets() {
+        let run_waiting = AutomateRequest::Run {
+            command: "Write-Output hi".to_string(),
+            args: Vec::new(),
+            wait: true,
+            hidden: false,
+            timeout_ms: 1_000,
+        };
+        assert!(wants_progress(&run_waiting));
+
+        let run_background = AutomateRequest::Run {
+            command: "Write-Output hi".to_string(),
+            args: Vec::new(),
+            wait: false,
+            hidden: false,
+            timeout_ms: 1_000,
+        };
+        assert!(!wants_progress(&run_background));
+        assert!(!wants_progress(&AutomateRequest::Status));
+
         assert_eq!(request_timeout(&AutomateRequest::Status), DEFAULT_REQUEST_TIMEOUT);
 
         let snapshot = AutomateRequest::Snapshot {

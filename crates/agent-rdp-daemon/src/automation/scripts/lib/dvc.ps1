@@ -340,3 +340,35 @@ function Send-DvcPoll {
 
     Write-DvcMessage -Handle $Handle -Message $poll
 }
+
+# Send a progress heartbeat for a long-running request. The daemon uses it to
+# tell a busy agent from a dead one. It is only sent when the daemon explicitly
+# asked for progress on that request, so older daemons never see the new
+# message type at all.
+function Send-DvcProgress {
+    param(
+        [IntPtr]$Handle,
+        [string]$Id,
+        [string]$Phase,
+        [int]$ElapsedMs = 0,
+        [int]$Nodes = 0
+    )
+
+    if ($script:ProgressLogEnabled) {
+        Write-Log ('progress: ' + $Phase + ' id=' + $Id + ' elapsed_ms=' + $ElapsedMs + ' nodes=' + $Nodes)
+    }
+
+    if (-not $script:ProgressEnabled) { return }
+
+    try {
+        Write-DvcMessage -Handle $Handle -Message @{
+            type = "progress"
+            id = $Id
+            phase = $Phase
+            elapsed_ms = $ElapsedMs
+            nodes = $Nodes
+        }
+    } catch {
+        Write-Log ("Failed to send progress: " + $_.Exception.Message) "WARN"
+    }
+}

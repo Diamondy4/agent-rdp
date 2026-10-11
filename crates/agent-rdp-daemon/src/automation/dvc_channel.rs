@@ -31,6 +31,9 @@ pub enum DvcProtocolMessage {
         id: String,
         command: String,
         params: serde_json::Value,
+        /// Ask the agent to send progress heartbeats while this request runs.
+        #[serde(default)]
+        progress: bool,
     },
     /// Response sent from PowerShell to Rust.
     Response {
@@ -41,6 +44,14 @@ pub enum DvcProtocolMessage {
     },
     /// Poll message from PowerShell to trigger sending queued requests.
     Poll,
+    /// Heartbeat sent by PowerShell while a long request is still running.
+    /// It does not replace the response; it only proves the agent is alive.
+    Progress {
+        id: String,
+        phase: String,
+        elapsed_ms: u64,
+        nodes: u64,
+    },
 }
 
 /// Error in DVC response.
@@ -269,6 +280,19 @@ impl DvcProcessor for AutomationDvc {
                 // Just acknowledge receipt
                 trace!("Received poll from PowerShell (ignored - using proactive send)");
             }
+
+            DvcProtocolMessage::Progress {
+                id,
+                phase,
+                elapsed_ms,
+                nodes,
+            } => {
+                // A heartbeat proves the agent is alive and working, so a long
+                // request must not be mistaken for a dead channel.
+                self.state.lock().consecutive_failures = 0;
+
+                trace!("Agent progress: id={} phase={} elapsed_ms={} nodes={}", id, phase, elapsed_ms, nodes);
+            }
         }
 
         // We now send data proactively through the command channel, so no queued messages
@@ -332,14 +356,16 @@ mod tests {
             id: "abc123".to_string(),
             command: "snapshot".to_string(),
             params: serde_json::json!({"interactive_only": true}),
+            progress: true,
         };
 
         let encoded = AutomationDvc::encode_message(&msg).unwrap();
         let decoded = AutomationDvc::decode_message(&encoded).unwrap();
 
         match decoded {
-            DvcProtocolMessage::Request { id, command, params } => {
+            DvcProtocolMessage::Request { id, command, params, progress } => {
                 assert_eq!(id, "abc123");
+                assert!(progress);
                 assert_eq!(command, "snapshot");
                 assert_eq!(params["interactive_only"], true);
             }

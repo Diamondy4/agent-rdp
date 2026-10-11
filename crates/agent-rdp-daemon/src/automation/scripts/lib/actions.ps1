@@ -588,6 +588,20 @@ function Invoke-Run {
         $stderrTask = $process.StandardError.ReadToEndAsync()
 
         $exited = $process.WaitForExit($timeoutMs)
+        # Wait in short slices so a long-running command can send heartbeats;
+        # the overall budget behaves exactly as before.
+        $runStart = Get-Date
+        while (-not $process.WaitForExit(250)) {
+            $elapsedRun = ((Get-Date) - $runStart).TotalMilliseconds
+
+            if ($null -eq $script:LastProgressAt -or ((Get-Date) - $script:LastProgressAt).TotalMilliseconds -gt 1000) {
+                $script:LastProgressAt = Get-Date
+                Send-DvcProgress -Handle $script:DvcHandle -Id $script:CurrentRequestId -Phase "run" -ElapsedMs ([int]$elapsedRun)
+            }
+
+            if ($elapsedRun -gt $timeoutMs) { break }
+        }
+        if ($process.HasExited) { $exited = $true }
 
         if (-not $exited) {
             try { $process.Kill() } catch {}
@@ -624,6 +638,13 @@ function Invoke-WaitFor {
         $elapsed = ((Get-Date) - $startTime).TotalMilliseconds
         if ($elapsed -gt $timeout) {
             throw "Timeout waiting for element: $selector (state: $state)"
+        }
+
+        # Heartbeat while polling: wait_for can legitimately run for tens of
+        # seconds, and the daemon must not read that as a dead agent.
+        if ($null -eq $script:LastProgressAt -or ((Get-Date) - $script:LastProgressAt).TotalMilliseconds -gt 1000) {
+            $script:LastProgressAt = Get-Date
+            Send-DvcProgress -Handle $script:DvcHandle -Id $script:CurrentRequestId -Phase "wait_for" -ElapsedMs ([int]$elapsed)
         }
 
         $element = $null
