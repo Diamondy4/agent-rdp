@@ -183,6 +183,7 @@ $script:ChannelPduHeaderSize = 8
 # as several chunks whose last one carries CHANNEL_FLAG_LAST; the payload can
 # only be parsed once that chunk has been read (MS-RDPBCGR 2.2.6.1.1).
 $script:ChannelFlagLast = 0x00000002
+$script:ChannelFlagFirst = 0x00000001
 
 # Read a JSON message from DVC using file handle
 # Note: ReadFile on DVC file handle includes CHANNEL_PDU_HEADER (8 bytes) before data
@@ -197,6 +198,7 @@ function Read-DvcMessage {
     # A message may span several channel chunks; keep reading until the chunk
     # carrying CHANNEL_FLAG_LAST arrives, then parse the reassembled payload.
     $stream = New-Object System.IO.MemoryStream
+    $sawFirstChunk = $false
 
     try {
         while ($true) {
@@ -240,8 +242,20 @@ function Read-DvcMessage {
                 throw 'DVC message exceeds the maximum size of ' + $script:MaxMessageSize + ' bytes'
             }
 
-            # Chunk flags of 0 are treated as a complete single-chunk message
-            if ($chunkFlags -eq 0 -or ($chunkFlags -band $script:ChannelFlagLast) -ne 0) {
+            # Only CHANNEL_FLAG_LAST ends a message. A chunk carrying (or following)
+            # CHANNEL_FLAG_FIRST belongs to a multi-chunk message whose middle chunks
+            # carry no flags at all - those must not be mistaken for a complete
+            # single-chunk message. Chunks that never saw a FIRST flag are legacy
+            # single-chunk messages and end the message immediately.
+            if (($chunkFlags -band $script:ChannelFlagFirst) -ne 0) {
+                $sawFirstChunk = $true
+            }
+
+            if (($chunkFlags -band $script:ChannelFlagLast) -ne 0) {
+                break
+            }
+
+            if (-not $sawFirstChunk) {
                 break
             }
         }
