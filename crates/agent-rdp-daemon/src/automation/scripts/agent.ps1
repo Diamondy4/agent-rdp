@@ -40,6 +40,37 @@ function Write-Log {
     } catch {}
 }
 
+# ============ SINGLE INSTANCE ============
+
+# Only one helper can own the DVC channel: the daemon routes requests to the
+# newest channel instance, so an older agent that stays alive is a zombie that
+# still holds memory and its own channel handle. A freshly started agent takes
+# over by stopping the older agent processes before it opens its own channel.
+function Remove-StaleAgentProcesses {
+    $stopped = 0
+
+    try {
+        $siblings = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" |
+            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*agent.ps1*' }
+
+        foreach ($sibling in $siblings) {
+            try {
+                Stop-Process -Id $sibling.ProcessId -Force -ErrorAction Stop
+                $stopped++
+            } catch {
+                Write-Log "Could not stop stale agent process $($sibling.ProcessId): $($_.Exception.Message)" "WARN"
+            }
+        }
+    } catch {
+        Write-Log "Could not scan for stale agent processes: $($_.Exception.Message)" "WARN"
+    }
+
+    if ($stopped -gt 0) {
+        Write-Log "Stopped $stopped older agent process(es); taking over the DVC channel"
+        Start-Sleep -Milliseconds 300
+    }
+}
+
 # ============ LOAD LIBRARY FILES ============
 
 $scriptDir = $PSScriptRoot
@@ -56,6 +87,8 @@ function Start-Agent {
     Write-Log "Agent starting with DVC transport"
     Write-Log "Local log path: $script:LocalLogPath"
     Write-Log "BasePath (for reference): $BasePath"
+
+    Remove-StaleAgentProcesses
 
     # Open DVC channel
     Write-Log "Opening DVC channel..."
